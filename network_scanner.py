@@ -177,26 +177,53 @@ def export_to_csv(results: list[dict], filename: str, console: Console):
 def main():
     """Main function to parse arguments and execute the scan."""
     parser = argparse.ArgumentParser(
-        description="Scan a CIDR subnet for live devices, retrieving MAC, IP, Hostname, and OS.",
-        epilog="Requires elevated privileges (sudo) and a working Nmap installation."
-    )
-    
-    # Version Argument
-    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {__version__}')
-    
-    # CIDR Argument
-    parser.add_argument(
-        "cidr", 
-        nargs='?', 
-        default=DEFAULT_CIDR,
-        help=f"The CIDR range to scan (e.g., 192.168.1.0/24). Defaults to {DEFAULT_CIDR}."
+        description=(
+            "Network Inventory Scanner\n"
+            "\n"
+            "Performs a two-stage device discovery on a local subnet:\n"
+            "  1) ARP sweep for fast detection of live hosts (IP + MAC)\n"
+            "  2) Nmap interrogation for Hostname, OS fingerprint, MAC vendor,\n"
+            "     and port states for SSH (22) and HTTP (80)\n"
+            "\n"
+            "Results are presented in a sorted Rich table with truncated columns\n"
+            "and color-coded port status indicators. Optional CSV export available."
+        ),
+        epilog=(
+            "Notes:\n"
+            "  • Requires root/sudo privileges for Nmap OS detection.\n"
+            "  • ARP scanning works only on local networks.\n"
+            "  • Nmap must be installed and accessible in PATH.\n"
+            "\n"
+            "Example:\n"
+            "  sudo ./network_inventory.py 192.168.1.0/24 --export\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
-    # Export Argument
     parser.add_argument(
-        '--export',
-        action='store_true',
-        help="Export the results to a CSV file named 'network_inventory.csv'."
+        "cidr",
+        nargs="?",
+        default=DEFAULT_CIDR,
+        help=(
+            "CIDR subnet to scan (e.g., 192.168.1.0/24). "
+            f"Defaults to {DEFAULT_CIDR} if omitted."
+        )
+    )
+
+    parser.add_argument(
+        "--export",
+        action="store_true",
+        help=(
+            "Export scan results to a CSV file named 'network_inventory.csv' "
+            "in the current directory."
+        )
+    )
+
+    parser.add_argument(
+        "-v", "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Show program version and exit."
     )
     
     args = parser.parse_args()
