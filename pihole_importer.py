@@ -16,6 +16,7 @@ import os
 import shutil
 import re
 import ipaddress
+import subprocess
 from datetime import datetime
 
 import toml  # pip install toml
@@ -24,7 +25,7 @@ import toml  # pip install toml
 PIHOLE_TOML_PATH = "/etc/pihole/pihole.toml"
 # define your local DNS domain here
 DOMAIN = "home.lan"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 HOSTNAME_RE = re.compile(
@@ -107,6 +108,30 @@ def parse_reservations(input_file_path):
     return dns_hosts, dhcp_hosts
 
 
+# ---------- Helpers ----------
+
+def parse_dns_entry(entry_str):
+    """
+    Expects format: "IP FQDN HOSTNAME"
+    Returns: (ip, fqdn, hostname)
+    """
+    parts = entry_str.split()
+    if len(parts) >= 3:
+        return parts[0], parts[1], parts[2]
+    return None, None, None
+
+
+def parse_dhcp_entry(entry_str):
+    """
+    Expects format: "MAC,IP,HOSTNAME"
+    Returns: (mac, ip, hostname)
+    """
+    parts = entry_str.split(",")
+    if len(parts) >= 3:
+        return parts[0], parts[1], parts[2]
+    return None, None, None
+
+
 # ---------- TOML handling ----------
 
 def backup_pihole_toml():
@@ -124,27 +149,98 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
         print(f"Error reading TOML: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # DNS
+    # --- DNS Processing ---
     data.setdefault("dns", {})
     data["dns"].setdefault("hosts", [])
-    existing_dns = set(data["dns"]["hosts"])
+    
+    # Map IP -> full_entry_string
+    existing_dns_map = {}
+    for entry in data["dns"]["hosts"]:
+        ip, _, _ = parse_dns_entry(entry)
+        if ip:
+            existing_dns_map[ip] = entry
 
-    dns_added = 0
-    for entry in dns_hosts:
-        if entry not in existing_dns:
-            data["dns"]["hosts"].append(entry)
-            dns_added += 1
+    dns_to_add = {}
+    dns_conflicts = []
 
-    # DHCP
+    for new_entry in dns_hosts:
+        new_ip, _, new_host = parse_dns_entry(new_entry)
+        if not new_ip:
+            continue
+
+        if new_ip in existing_dns_map:
+            old_entry = existing_dns_map[new_ip]
+            if old_entry != new_entry:
+                dns_conflicts.append((new_ip, "DNS", old_entry, new_entry))
+            # If identical, do nothing (idempotent)
+        else:
+            dns_to_add[new_ip] = new_entry
+
+    # --- DHCP Processing ---
     data.setdefault("dhcp", {})
     data["dhcp"].setdefault("hosts", [])
-    existing_dhcp = set(data["dhcp"]["hosts"])
 
-    dhcp_added = 0
-    for entry in dhcp_hosts:
-        if entry not in existing_dhcp:
-            data["dhcp"]["hosts"].append(entry)
-            dhcp_added += 1
+    # Map IP -> full_entry_string
+    existing_dhcp_map = {}
+    for entry in data["dhcp"]["hosts"]:
+        _, ip, _ = parse_dhcp_entry(entry)
+        if ip:
+            existing_dhcp_map[ip] = entry
+
+    dhcp_to_add = {}
+    dhcp_conflicts = []
+
+    for new_entry in dhcp_hosts:
+        _, new_ip, _ = parse_dhcp_entry(new_entry)
+        if not new_ip:
+            continue
+
+        if new_ip in existing_dhcp_map:
+            old_entry = existing_dhcp_map[new_ip]
+            if old_entry != new_entry:
+                dhcp_conflicts.append((new_ip, "DHCP", old_entry, new_entry))
+        else:
+            dhcp_to_add[new_ip] = new_entry
+
+    # --- Handle Conflicts ---
+    all_conflicts = dns_conflicts + dhcp_conflicts
+    if all_conflicts:
+        print("\n⚠️  Found conflicting entries for existing IP addresses:")
+        for ip, kind, old, new in all_conflicts:
+            print(f"   [{kind}] IP: {ip}")
+            print(f"      Current: {old}")
+            print(f"      New:     {new}")
+        
+        response = input("\nDo you want to overwrite these entries with the new values? [y/N] ").strip().lower()
+        if response != 'y':
+            print("Aborting. No changes made.")
+            sys.exit(0)
+        
+        # User confirmed, add conflicts to the "to_add" maps (overwriting logic below will handle it)
+        for ip, kind, _, new_entry in all_conflicts:
+            if kind == "DNS":
+                dns_to_add[ip] = new_entry
+            elif kind == "DHCP":
+                dhcp_to_add[ip] = new_entry
+
+    # --- Apply Updates ---
+    
+    # 1. Update Maps with new items (this handles both new and overwritten)
+    for ip, entry in dns_to_add.items():
+        existing_dns_map[ip] = entry
+        
+    for ip, entry in dhcp_to_add.items():
+        existing_dhcp_map[ip] = entry
+
+    # 2. Convert back to lists
+    # We want to preserve order somewhat, or just dump values. 
+    # To keep it loosely stable, we could carry over the original list, 
+    # but since we might be overwriting, rebuilding from the map is safer to ensure uniqueness by IP.
+    # However, to be nice to the file structure, maybe we just append new ones and find/replace existing logic? 
+    # Rebuilding from map is easiest to guarantee idempotency and no duplicates.
+    
+    data["dns"]["hosts"] = list(existing_dns_map.values())
+    data["dhcp"]["hosts"] = list(existing_dhcp_map.values())
 
     backup_pihole_toml()
 
@@ -156,18 +252,41 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
         sys.exit(1)
 
     print(f"✅ Updated {PIHOLE_TOML_PATH}")
-    print(f"   DNS:  appended {dns_added}")
-    print(f"   DHCP: appended {dhcp_added}")
+    print(f"   DNS entries count:  {len(data['dns']['hosts'])}")
+    print(f"   DHCP entries count: {len(data['dhcp']['hosts'])}")
     print("   Restarting Pi-hole FTL...")
 
-    os.system("systemctl restart pihole-FTL.service")
+    print("   Restarting Pi-hole FTL...")
+
+    subprocess.run(["systemctl", "restart", "pihole-FTL.service"], check=False)
+    
+    # Check status
+    try:
+        result = subprocess.run(
+            ["systemctl", "status", "pihole-FTL", "--no-pager"], 
+            capture_output=True, 
+            text=True
+        )
+        if "Active: active (running)" in result.stdout:
+            print("✅ Pi-hole FTL is active and running.")
+        else:
+            print("⚠️  Warning: Pi-hole FTL did not report 'active (running)'. Check 'systemctl status pihole-FTL'.")
+    except FileNotFoundError:
+        print("⚠️  Could not run systemctl. Is this a systemd system?")
 
 
 # ---------- Main ----------
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Populate Pi-hole v6 DNS and DHCP static reservations",
+        description=(
+            "Populate Pi-hole v6 DNS and DHCP static reservations.\n"
+            "Features:\n"
+            "  - Validates MAC, IP, and Hostnames.\n"
+            "  - Checks for existing entries in pihole.toml.\n"
+            "  - Detects conflicts (same IP, different details) and prompts user.\n"
+            "  - Idempotent: Replaces differing entries if confirmed, ignores identicals."
+        ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
 
