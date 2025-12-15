@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Populate Pi-hole v6 local DNS and static DHCP entries from a reservation file.
+Populate Pi-hole 6.x local DNS and static DHCP entries from a reservation file.
 
 Source format (required):
 MAC,IP,Hostname
@@ -23,9 +23,9 @@ import toml  # pip install toml
 
 # --- Configuration ---
 PIHOLE_TOML_PATH = "/etc/pihole/pihole.toml"
-# define your local DNS domain here
+# define your local DNS domain below
 DOMAIN = "home.lan"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 HOSTNAME_RE = re.compile(
