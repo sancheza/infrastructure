@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
 
+"""
+Script Name: check_latency.py
+Description:
+    High-precision network latency and packet loss tester for macOS/Linux.
+    It wraps the system `ping` command to send a stream of ICMP packets
+    at a specified interval, parsing the output to provide detailed statistics
+    including min/avg/max/stddev RTT and precise packet loss percentages.
+
+Usage:
+    python3 check_latency.py [-h] [-d DURATION] [-t TARGET] [-i INTERVAL]
+
+Examples:
+    python3 check_latency.py                      # Default: 10 mins, target 8.8.8.8
+    python3 check_latency.py -d 5 -t 1.1.1.1      # 5 mins, target 1.1.1.1
+    python3 check_latency.py -i 0.5               # Interval of 0.5s between pings
+"""
+
 import subprocess
 import re
 import argparse
