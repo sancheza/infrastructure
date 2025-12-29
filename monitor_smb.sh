@@ -1,7 +1,24 @@
 #!/bin/bash
-# Modern SMB + Wi-Fi monitoring script for macOS
-# Monitors Finder-mounted SMB shares and Wi-Fi signal quality
-# Press Ctrl+C to stop
+# ==============================================================================
+# Script Name: monitor_smb.sh
+# Description:
+#   A real-time monitoring tool for macOS that tracks the status of mounted 
+#   SMB shares and Wi-Fi signal quality side-by-side.
+#
+#   It displays:
+#   - SMB Mount Status: Mount point, connection status, protocol version, 
+#     and session reconnect counts (useful for spotting drops).
+#   - Wi-Fi Signal: RSSI (Signal Strength), Noise level, and SNR (Signal-to-Noise Ratio).
+#
+# Usage:
+#   ./monitor_smb.sh
+#
+#   Press Ctrl+C to stop the monitoring loop.
+#
+# Requirements:
+#   - macOS (relies on `smbutil` and the Apple80211 framework)
+# ==============================================================================
+
 
 INTERVAL=5  # seconds between polls
 WIFI_INTERFACE="en0"  # adjust if your Wi-Fi interface is different
