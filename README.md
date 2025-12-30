@@ -1,16 +1,16 @@
 # Infrastructure & Network Utilities
 
-A collection of professional-grade scripts and tools designed for network administration, performance monitoring, and infrastructure configuration. These utilities cover macOS, Linux, and Windows environments.
+A collection of scripts and tools designed for network administration, performance monitoring, and infrastructure configuration. These utilities cover macOS, Linux, and Windows environments.
 
-## 📂 Repository Contents
+## Repository Contents
 
-### 🔎 Network Discovery & Auditing
+### Network Discovery & Auditing
 | Script | OS | Language | Description |
 |--------|----|----------|-------------|
 | **[network_scanner.py](#network-inventory-scanner)** | Linux/macOS | Python | Subnet scanner with ARP & Nmap integration. |
 | **[proxmox_net_check.sh](#proxmox-lxc-network-auditor)** | Proxmox | Bash | Rapidly audit network interfaces for LXC containers. |
 
-### 📈 Performance & Connectivity Monitoring
+### Performance & Connectivity Monitoring
 | Script | OS | Language | Description |
 |--------|----|----------|-------------|
 | **[check_latency.py](#high-precision-latency-tester)** | Linux/macOS | Python | Detailed latency and packet loss analysis tool. |
@@ -18,14 +18,14 @@ A collection of professional-grade scripts and tools designed for network admini
 | **[check_wifi.sh](#macos-wi-fi-signal-monitor)** | macOS | Bash | Real-time RSSI signal strength monitor. |
 | **[monitor_smb.sh](#macos-smb--wi-fi-monitor)** | macOS | Bash | Side-by-side monitoring of SMB and Wi-Fi quality. |
 
-### ⚙️ Infrastructure Configuration
+### Infrastructure Configuration
 | Script | OS | Language | Description |
 |--------|----|----------|-------------|
 | **[pihole_importer.py](#pi-hole-v6-reservation-importer)** | Pi-hole | Python | Bulk importer for static DHCP/DNS into Pi-hole v6. |
 
 ---
 
-## 🛠️ Tool Details & Usage
+## Tool Details & Usage
 
 ### Network Discovery & Auditing
 
@@ -72,7 +72,7 @@ A collection of professional-grade scripts and tools designed for network admini
 
 ---
 
-## 📦 Dependencies
+## Dependencies
 
 Install Python dependencies via:
 ```bash
@@ -82,7 +82,7 @@ pip install -r requirements.txt
 - **Nmap**: Required for `network_scanner.py`.
 - **System Tools**: `wdutil`, `smbutil`, `airport` (standard on macOS).
 
-## 📄 License & Contributing
+## License & Contributing
 
 - This project is licensed under the **MIT License**. See [LICENSE](LICENSE) for details.
 - Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
