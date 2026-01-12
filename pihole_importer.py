@@ -25,7 +25,7 @@ import toml  # pip install toml
 PIHOLE_TOML_PATH = "/etc/pihole/pihole.toml"
 # define your local DNS domain below
 DOMAIN = "home.lan"
-VERSION = "1.0.2"
+VERSION = "1.1.0"
 
 MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 HOSTNAME_RE = re.compile(
@@ -36,10 +36,30 @@ HOSTNAME_RE = re.compile(
 # ---------- Validation ----------
 
 def validate_mac(mac):
+    """
+    Validate a MAC address format.
+    
+    Args:
+        mac (str): MAC address to validate
+        
+    Returns:
+        bool: True if valid MAC address format, False otherwise
+        
+    Format: XX:XX:XX:XX:XX:XX (hexadecimal, case insensitive)
+    """
     return bool(MAC_RE.match(mac))
 
 
 def validate_ip(ip):
+    """
+    Validate an IPv4 address.
+    
+    Args:
+        ip (str): IP address to validate
+        
+    Returns:
+        bool: True if valid IPv4 address, False otherwise
+    """
     try:
         ipaddress.IPv4Address(ip)
         return True
@@ -48,12 +68,44 @@ def validate_ip(ip):
 
 
 def validate_hostname(hostname):
+    """
+    Validate a hostname according to DNS rules.
+    
+    Args:
+        hostname (str): Hostname to validate
+        
+    Returns:
+        bool: True if valid hostname, False otherwise
+        
+    Rules:
+        - 1-63 characters
+        - Alphanumeric and hyphens only
+        - Cannot start or end with hyphen
+        - Case insensitive
+    """
     return bool(HOSTNAME_RE.match(hostname))
 
 
 # ---------- Parsing ----------
 
 def parse_reservations(input_file_path):
+    """
+    Parse and validate reservations from input file.
+    
+    Args:
+        input_file_path (str): Path to CSV file containing reservations
+        
+    Returns:
+        tuple: (dns_hosts, dhcp_hosts) where:
+            - dns_hosts: List of DNS entries in format "IP FQDN HOSTNAME"
+            - dhcp_hosts: List of DHCP entries in format "MAC,IP,HOSTNAME"
+            
+    Raises:
+        SystemExit: If validation fails or no valid records found
+        
+    File format: MAC,IP,Hostname (one per line)
+    Skips empty lines and comments (lines starting with #)
+    """
     dns_hosts = []
     dhcp_hosts = []
     errors = []
@@ -112,8 +164,13 @@ def parse_reservations(input_file_path):
 
 def parse_dns_entry(entry_str):
     """
-    Expects format: "IP FQDN HOSTNAME"
-    Returns: (ip, fqdn, hostname)
+    Parse a DNS entry string.
+    
+    Args:
+        entry_str (str): DNS entry string in format "IP FQDN HOSTNAME"
+        
+    Returns:
+        tuple: (ip, fqdn, hostname) or (None, None, None) if parsing fails
     """
     parts = entry_str.split()
     if len(parts) >= 3:
@@ -123,8 +180,13 @@ def parse_dns_entry(entry_str):
 
 def parse_dhcp_entry(entry_str):
     """
-    Expects format: "MAC,IP,HOSTNAME"
-    Returns: (mac, ip, hostname)
+    Parse a DHCP entry string.
+    
+    Args:
+        entry_str (str): DHCP entry string in format "MAC,IP,HOSTNAME"
+        
+    Returns:
+        tuple: (mac, ip, hostname) or (None, None, None) if parsing fails
     """
     parts = entry_str.split(",")
     if len(parts) >= 3:
@@ -135,13 +197,111 @@ def parse_dhcp_entry(entry_str):
 # ---------- TOML handling ----------
 
 def backup_pihole_toml():
+    """
+    Create a timestamped backup of the Pi-hole TOML configuration file.
+    
+    Creates backup in format: /etc/pihole/pihole.toml.YYYYMMDD-HHMMSS
+    """
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup_path = f"{PIHOLE_TOML_PATH}.{ts}"
     shutil.copy2(PIHOLE_TOML_PATH, backup_path)
     print(f"🗄  Backup created: {backup_path}")
 
 
+def export_pihole_entries():
+    """
+    Export existing Pi-hole DNS and DHCP entries to a CSV file.
+    
+    Exports entries in format: MAC,IP,Hostname
+    Creates file in format: macaddr.YYYYMMDD-HHMMSS.csv
+    
+    Returns:
+        str: Path to the exported file
+        
+    Raises:
+        SystemExit: If there are errors reading the TOML file
+    """
+    try:
+        with open(PIHOLE_TOML_PATH, "r") as f:
+            data = toml.load(f)
+    except Exception as e:
+        print(f"Error reading TOML: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Extract DNS and DHCP entries
+    dns_entries = data.get("dns", {}).get("hosts", [])
+    dhcp_entries = data.get("dhcp", {}).get("hosts", [])
+
+    # Create a mapping from IP to hostname for DNS entries
+    dns_map = {}
+    for entry in dns_entries:
+        ip, fqdn, hostname = parse_dns_entry(entry)
+        if ip and hostname:
+            dns_map[ip] = hostname
+
+    # Build export entries from DHCP (which has MAC addresses)
+    export_entries = []
+    for entry in dhcp_entries:
+        mac, ip, hostname = parse_dhcp_entry(entry)
+        if mac and ip:
+            # Use hostname from DHCP entry, fall back to DNS hostname if available
+            final_hostname = hostname or dns_map.get(ip, "")
+            if final_hostname:
+                export_entries.append(f"{mac},{ip},{final_hostname}")
+
+    # Add DNS entries that don't have corresponding DHCP entries
+    for ip, hostname in dns_map.items():
+        # Check if this IP already exists in our export (from DHCP)
+        ip_exists = any(entry.startswith(f",{ip},") or entry.split(",")[1] == ip for entry in export_entries)
+        if not ip_exists:
+            # For DNS-only entries, we don't have a MAC, so skip them
+            continue
+
+    if not export_entries:
+        print("No entries found to export.", file=sys.stderr)
+        return None
+
+    # Generate timestamped filename
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    export_filename = f"macaddr.{ts}.csv"
+    
+    # Write export file
+    try:
+        with open(export_filename, "w") as f:
+            f.write("# Pi-hole DNS and DHCP entries export\n")
+            f.write("# Format: MAC,IP,Hostname\n")
+            f.write("# Generated: {}\n\n".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            for entry in sorted(export_entries):
+                f.write(f"{entry}\n")
+        
+        print(f"📤 Exported {len(export_entries)} entries to {export_filename}")
+        return export_filename
+        
+    except Exception as e:
+        print(f"Error writing export file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def update_pihole_toml(dns_hosts, dhcp_hosts):
+    """
+    Update Pi-hole TOML configuration with new DNS and DHCP entries.
+    
+    Args:
+        dns_hosts (list): List of DNS entries in format "IP FQDN HOSTNAME"
+        dhcp_hosts (list): List of DHCP entries in format "MAC,IP,HOSTNAME"
+        
+    Process:
+        1. Loads existing configuration
+        2. Checks for conflicts with existing entries
+        3. Prompts user for conflict resolution
+        4. Updates configuration
+        5. Creates backup
+        6. Writes updated configuration
+        7. Restarts Pi-hole FTL service
+        
+    Raises:
+        SystemExit: If there are errors reading/writing TOML or restarting service
+    """
     try:
         with open(PIHOLE_TOML_PATH, "r") as f:
             data = toml.load(f)
@@ -280,12 +440,44 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Populate Pi-hole v6 DNS and DHCP static reservations.\n"
-            "Features:\n"
-            "  - Validates MAC, IP, and Hostnames.\n"
-            "  - Checks for existing entries in pihole.toml.\n"
-            "  - Detects conflicts (same IP, different details) and prompts user.\n"
-            "  - Idempotent: Replaces differing entries if confirmed, ignores identicals."
+            "Pi-hole Importer - Import DNS and DHCP reservations from CSV file\n"
+            "\n"
+            "OVERVIEW:\n"
+            "  This script imports static DNS and DHCP reservations into Pi-hole 6.x\n"
+            "  from a CSV file. It validates entries, checks for conflicts, and safely\n"
+            "  updates your Pi-hole configuration.\n"
+            "\n"
+            "USAGE:\n"
+            "  pihole_importer.py [reservations.csv]\n"
+            "\n"
+            "  If no input file is specified, defaults to 'macaddr.txt'\n"
+            "\n"
+            "FEATURES:\n"
+            "  • Validates MAC addresses, IP addresses, and hostnames\n"
+            "  • Checks for existing entries in pihole.toml\n"
+            "  • Detects conflicts (same IP, different details) and prompts user\n"
+            "  • Creates automatic backups before making changes\n"
+            "  • Idempotent operation (safe to run multiple times)\n"
+            "  • Automatically restarts Pi-hole FTL service\n"
+            "\n"
+            "INPUT FILE FORMAT:\n"
+            "  MAC,IP,Hostname\n"
+            "\n"
+            "EXAMPLE:\n"
+            "  00:11:22:33:44:55,192.168.1.100,mydevice\n"
+            "  AA:BB:CC:DD:EE:FF,192.168.1.101,anotherdevice\n"
+            "\n"
+            "DEFAULT FILE:\n"
+            "  If no file is specified, the script looks for 'macaddr.txt'\n"
+            "\n"
+            "EXPORT FUNCTIONALITY:\n"
+            "  Use --export flag to export existing Pi-hole entries\n"
+            "  Creates macaddr.YYYYMMDD-HHMMSS.csv with current entries\n"
+            "\n"
+            "NOTES:\n"
+            "  • Strict validation is enforced\n"
+            "  • Invalid input will abort the operation\n"
+            "  • Requires toml package (pip install toml)"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -297,13 +489,24 @@ def main():
     parser.add_argument(
         "input_file",
         type=str,
-        help="Format: MAC,IP,Hostname",
+        nargs="?",
+        default="macaddr.txt",
+        help="Format: MAC,IP,Hostname (default: macaddr.txt)",
+    )
+
+    parser.add_argument(
+        "--export",
+        action="store_true",
+        help="Export existing Pi-hole entries to macaddr.[timestamp].csv file",
     )
 
     args = parser.parse_args()
 
-    dns_hosts, dhcp_hosts = parse_reservations(args.input_file)
-    update_pihole_toml(dns_hosts, dhcp_hosts)
+    if args.export:
+        export_pihole_entries()
+    else:
+        dns_hosts, dhcp_hosts = parse_reservations(args.input_file)
+        update_pihole_toml(dns_hosts, dhcp_hosts)
 
 
 if __name__ == "__main__":
