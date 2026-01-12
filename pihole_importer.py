@@ -208,6 +208,203 @@ def backup_pihole_toml():
     print(f"🗄  Backup created: {backup_path}")
 
 
+def audit_entries(input_file_path):
+    """
+    Audit entries between Pi-hole TOML and input CSV file.
+    
+    Compares all entries and categorizes them as:
+    - Same: All 3 fields match (MAC, IP, Hostname)
+    - Different: Same IP but different MAC or Hostname
+    - Only in Pi-hole: Entries only in TOML file
+    - Only in CSV: Entries only in input file
+    
+    Args:
+        input_file_path (str): Path to CSV file to compare against Pi-hole
+        
+    Returns:
+        None (prints results to console and exits)
+        
+    Raises:
+        SystemExit: Always exits after showing audit results
+    """
+    # Parse the input file
+    try:
+        if os.path.exists(input_file_path):
+            dns_hosts, dhcp_hosts = parse_reservations(input_file_path)
+        else:
+            print(f"⚠️  Input file not found: {input_file_path}", file=sys.stderr)
+            print("   Only Pi-hole entries will be shown.", file=sys.stderr)
+            dns_hosts, dhcp_hosts = [], []
+    except SystemExit:
+        # If parse_reservations calls sys.exit(), we'll catch it and continue
+        # This handles the case where the file exists but has validation errors
+        print("⚠️  Input file has validation errors, skipping CSV comparison.", file=sys.stderr)
+        dns_hosts, dhcp_hosts = [], []
+
+    # Parse Pi-hole TOML entries
+    try:
+        with open(PIHOLE_TOML_PATH, "r") as f:
+            data = toml.load(f)
+    except Exception as e:
+        print(f"Error reading TOML: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Extract and parse Pi-hole entries
+    pihole_dns_entries = data.get("dns", {}).get("hosts", [])
+    pihole_dhcp_entries = data.get("dhcp", {}).get("hosts", [])
+
+    # Create sets for comparison
+    # Format: (mac, ip, hostname)
+    pihole_entries = set()
+    csv_entries = set()
+
+    # Parse Pi-hole DHCP entries (these have MAC addresses)
+    for entry in pihole_dhcp_entries:
+        mac, ip, hostname = parse_dhcp_entry(entry)
+        if mac and ip and hostname:
+            pihole_entries.add((mac.lower(), ip, hostname.lower()))
+
+    # Parse Pi-hole DNS entries that don't have DHCP counterparts
+    pihole_dns_map = {}
+    for entry in pihole_dns_entries:
+        ip, fqdn, hostname = parse_dns_entry(entry)
+        if ip and hostname:
+            pihole_dns_map[ip] = hostname.lower()
+
+    # Add DNS-only entries to pihole_entries (without MAC)
+    for ip, hostname in pihole_dns_map.items():
+        # Check if this IP already exists in DHCP entries
+        ip_in_dhcp = any(entry[1] == ip for entry in pihole_entries)
+        if not ip_in_dhcp:
+            # For DNS-only entries, we use empty MAC
+            pihole_entries.add(("", ip, hostname))
+
+    # Parse CSV entries
+    for i in range(min(len(dns_hosts), len(dhcp_hosts))):
+        # Parse DHCP format: MAC,IP,Hostname
+        mac, ip, hostname = parse_dhcp_entry(dhcp_hosts[i])
+        if mac and ip and hostname:
+            csv_entries.add((mac.lower(), ip, hostname.lower()))
+
+    # Categorize entries
+    same_entries = pihole_entries & csv_entries
+    conflicting_entries = set()
+    
+    # Find entries with same IP but different details
+    csv_by_ip = {entry[1]: entry for entry in csv_entries}
+    pihole_by_ip = {entry[1]: entry for entry in pihole_entries}
+    
+    for ip, csv_entry in csv_by_ip.items():
+        if ip in pihole_by_ip:
+            pihole_entry = pihole_by_ip[ip]
+            if csv_entry != pihole_entry:
+                conflicting_entries.add((csv_entry, pihole_entry, "same_ip"))
+
+    # Find entries with same hostname but different IPs or MACs
+    csv_by_hostname = {}
+    pihole_by_hostname = {}
+    
+    for entry in csv_entries:
+        mac, ip, hostname = entry
+        if hostname not in csv_by_hostname:
+            csv_by_hostname[hostname] = []
+        csv_by_hostname[hostname].append(entry)
+        
+    for entry in pihole_entries:
+        mac, ip, hostname = entry
+        if hostname not in pihole_by_hostname:
+            pihole_by_hostname[hostname] = []
+        pihole_by_hostname[hostname].append(entry)
+    
+    # Find hostname conflicts
+    for hostname, csv_entries_list in csv_by_hostname.items():
+        if hostname in pihole_by_hostname:
+            pihole_entries_list = pihole_by_hostname[hostname]
+            
+            # Compare each CSV entry with each Pi-hole entry for the same hostname
+            for csv_entry in csv_entries_list:
+                for pihole_entry in pihole_entries_list:
+                    csv_mac, csv_ip, csv_hostname = csv_entry
+                    pihole_mac, pihole_ip, pihole_hostname = pihole_entry
+                    
+                    # Skip if they're the same entry (already in same_entries)
+                    if csv_entry == pihole_entry:
+                        continue
+                    
+                    # Skip if this is already detected as an IP conflict
+                    if (csv_entry, pihole_entry, "same_ip") in conflicting_entries:
+                        continue
+                    
+                    # Check for conflicts: same hostname but different IP or MAC
+                    if csv_ip != pihole_ip or csv_mac != pihole_mac:
+                        conflicting_entries.add((csv_entry, pihole_entry, "same_hostname"))
+
+    only_in_pihole = pihole_entries - csv_entries
+    only_in_csv = csv_entries - pihole_entries
+
+    # Remove entries that are in conflicting_entries from the "only" sets
+    conflicting_ips = {csv_entry[1] for csv_entry, _, _ in conflicting_entries}
+    conflicting_hostnames = {csv_entry[2] for csv_entry, _, _ in conflicting_entries}
+    only_in_pihole = {entry for entry in only_in_pihole 
+                     if entry[1] not in conflicting_ips and entry[2] not in conflicting_hostnames}
+    only_in_csv = {entry for entry in only_in_csv 
+                  if entry[1] not in conflicting_ips and entry[2] not in conflicting_hostnames}
+
+    # Print results
+    print("🔍 AUDIT RESULTS")
+    print("=" * 50)
+    
+    total_pihole = len(pihole_entries)
+    total_csv = len(csv_entries)
+    
+    print(f"Total entries in Pi-hole: {total_pihole}")
+    print(f"Total entries in CSV file: {total_csv}")
+    print()
+    
+    print(f"🟢 SAME ENTRIES (all 3 fields match): {len(same_entries)}")
+    if same_entries:
+        for mac, ip, hostname in sorted(same_entries, key=lambda x: x[1]):
+            print(f"{mac.upper() if mac else '(no MAC)'},{ip},{hostname}")
+    
+    if conflicting_entries:
+        print(f"\n🟡 CONFLICTING ENTRIES: {len(conflicting_entries)}")
+        print("CSV:")
+        
+        # Collect and sort all CSV entries
+        csv_entries_list = []
+        pihole_entries_list = []
+        
+        for csv_entry, pihole_entry, _ in sorted(conflicting_entries, key=lambda x: (x[0][2], x[0][1])):
+            csv_mac, csv_ip, csv_hostname = csv_entry
+            csv_entries_list.append(f"{csv_mac.upper() if csv_mac else '(no MAC)'},{csv_ip},{csv_hostname}")
+            
+            pihole_mac, pihole_ip, pihole_hostname = pihole_entry
+            pihole_entries_list.append(f"{pihole_mac.upper() if pihole_mac else '(no MAC)'},{pihole_ip},{pihole_hostname}")
+        
+        # Print all CSV entries
+        for csv_entry in csv_entries_list:
+            print(csv_entry)
+        
+        print("\nPI-HOLE:")
+        # Print all Pi-hole entries
+        for pihole_entry in pihole_entries_list:
+            print(pihole_entry)
+        print()
+    
+    print(f"\n🔴 ONLY IN PI-HOLE: {len(only_in_pihole)}")
+    for mac, ip, hostname in sorted(only_in_pihole, key=lambda x: x[1]):
+        print(f"{mac.upper() if mac else '(no MAC)'},{ip},{hostname}")
+    
+    print(f"\n🔵 ONLY IN CSV FILE: {len(only_in_csv)}")
+    for mac, ip, hostname in sorted(only_in_csv, key=lambda x: x[1]):
+        print(f"{mac.upper() if mac else '(no MAC)'},{ip},{hostname}")
+    
+    print("\n" + "=" * 50)
+    print("AUDIT COMPLETE")
+    
+    sys.exit(0)
+
+
 def export_pihole_entries():
     """
     Export existing Pi-hole DNS and DHCP entries to a CSV file.
@@ -474,6 +671,11 @@ def main():
             "  Use --export flag to export existing Pi-hole entries\n"
             "  Creates macaddr.YYYYMMDD-HHMMSS.csv with current entries\n"
             "\n"
+            "AUDIT FUNCTIONALITY:\n"
+            "  Use --audit flag to compare Pi-hole entries with input file\n"
+            "  Shows detailed comparison: same, different, only in Pi-hole, only in file\n"
+            "  Uses default macaddr.txt if no file specified\n"
+            "\n"
             "NOTES:\n"
             "  • Strict validation is enforced\n"
             "  • Invalid input will abort the operation\n"
@@ -500,10 +702,18 @@ def main():
         help="Export existing Pi-hole entries to macaddr.[timestamp].csv file",
     )
 
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="Audit entries between Pi-hole and input file, showing matches and differences",
+    )
+
     args = parser.parse_args()
 
     if args.export:
         export_pihole_entries()
+    elif args.audit:
+        audit_entries(args.input_file)
     else:
         dns_hosts, dhcp_hosts = parse_reservations(args.input_file)
         update_pihole_toml(dns_hosts, dhcp_hosts)
