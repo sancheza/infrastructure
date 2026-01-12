@@ -19,7 +19,16 @@ import ipaddress
 import subprocess
 from datetime import datetime
 
-import toml  # pip install toml
+# Check for toml library availability
+try:
+    import toml
+except ImportError:
+    print("Error: 'toml' library not found.", file=sys.stderr)
+    print("On Debian/Raspberry Pi OS, install with:", file=sys.stderr)
+    print("  sudo apt install python3-toml", file=sys.stderr)
+    print("Or install via pip:", file=sys.stderr)
+    print("  pip install toml", file=sys.stderr)
+    sys.exit(1)
 
 # --- Configuration ---
 PIHOLE_TOML_PATH = "/etc/pihole/pihole.toml"
@@ -28,8 +37,14 @@ DOMAIN = "home.lan"
 VERSION = "1.1.0"
 
 MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
-HOSTNAME_RE = re.compile(
+# Regex for simple hostname (alphanumeric and hyphens)
+SIMPLE_HOSTNAME_RE = re.compile(
     r"^(?!-)[a-z0-9-]{1,63}(?<!-)$", re.IGNORECASE
+)
+
+# Regex for fully qualified domain name (allows dots)
+FQDN_RE = re.compile(
+    r"^(?!-)([a-z0-9-]{1,63}(?<!-)\.)+[a-z0-9-]{1,63}(?<!-)$", re.IGNORECASE
 )
 
 
@@ -37,7 +52,7 @@ HOSTNAME_RE = re.compile(
 
 def validate_mac(mac):
     """
-    Validate a MAC address format.
+    Validate a MAC address format with flexible input handling.
     
     Args:
         mac (str): MAC address to validate
@@ -45,9 +60,24 @@ def validate_mac(mac):
     Returns:
         bool: True if valid MAC address format, False otherwise
         
-    Format: XX:XX:XX:XX:XX:XX (hexadecimal, case insensitive)
+    Format: Accepts various formats (colons, hyphens, dots, or no separators)
+    Examples:
+        - 00:11:22:33:44:55 (colons)
+        - 00-11-22-33-44-55 (hyphens)
+        - 0011.2233.4455 (dots)
+        - 001122334455 (no separators)
+        
+    All formats are normalized to colon-separated format internally.
     """
-    return bool(MAC_RE.match(mac))
+    # Normalize: Remove all common separators (:, -, .) and convert to uppercase
+    normalized_mac = mac.replace(":", "").replace("-", "").replace(".", "").upper()
+    
+    # Validate: Must be exactly 12 hexadecimal characters
+    if len(normalized_mac) != 12 or not all(c in "0123456789ABCDEF" for c in normalized_mac):
+        return False
+        
+    # If validation passes, the MAC is valid (format will be standardized later)
+    return True
 
 
 def validate_ip(ip):
@@ -78,12 +108,12 @@ def validate_hostname(hostname):
         bool: True if valid hostname, False otherwise
         
     Rules:
-        - 1-63 characters
-        - Alphanumeric and hyphens only
-        - Cannot start or end with hyphen
+        - Simple hostname: 1-63 characters, alphanumeric and hyphens only, cannot start/end with hyphen
+        - FQDN: Multiple labels separated by dots, each label follows simple hostname rules
         - Case insensitive
     """
-    return bool(HOSTNAME_RE.match(hostname))
+    # Allow either simple hostname or fully qualified domain name
+    return bool(SIMPLE_HOSTNAME_RE.match(hostname) or FQDN_RE.match(hostname))
 
 
 # ---------- Parsing ----------
@@ -128,7 +158,13 @@ def parse_reservations(input_file_path):
             mac, ip, hostname = parts
             hostname = hostname.lower()
 
-            if not validate_mac(mac):
+            # Normalize MAC address to colon-separated format
+            if validate_mac(mac):
+                # Remove all separators and convert to uppercase
+                clean_mac = mac.replace(":", "").replace("-", "").replace(".", "").upper()
+                # Reformat with colons
+                mac = ":".join([clean_mac[i:i+2] for i in range(0, 12, 2)])
+            else:
                 errors.append((line_num, f"Invalid MAC address: {mac}", line))
             if not validate_ip(ip):
                 errors.append((line_num, f"Invalid IPv4 address: {ip}", line))
@@ -140,7 +176,11 @@ def parse_reservations(input_file_path):
             if any(e[0] == line_num for e in errors):
                 continue
 
-            fqdn = f"{hostname}.{DOMAIN}"
+            # Create FQDN, but don't double-append the domain if hostname is already fully qualified
+            if hostname.endswith(f".{DOMAIN}"):
+                fqdn = hostname
+            else:
+                fqdn = f"{hostname}.{DOMAIN}"
             dns_hosts.append(f"{ip} {fqdn} {hostname}")
             dhcp_hosts.append(f"{mac},{ip},{hostname}")
 
@@ -174,7 +214,7 @@ def parse_dns_entry(entry_str):
     """
     parts = entry_str.split()
     if len(parts) >= 3:
-        return parts[0], parts[1], parts[2]
+        return parts[0], parts[1], parts[2].lower()  # Normalize hostname to lowercase
     return None, None, None
 
 
@@ -187,10 +227,14 @@ def parse_dhcp_entry(entry_str):
         
     Returns:
         tuple: (mac, ip, hostname) or (None, None, None) if parsing fails
+        
+    Note:
+        MAC addresses are preserved in their original case for display/storage,
+        but normalized to uppercase for comparison purposes in other functions.
     """
     parts = entry_str.split(",")
     if len(parts) >= 3:
-        return parts[0], parts[1], parts[2]
+        return parts[0], parts[1], parts[2].lower()  # Preserve MAC case, normalize hostname to lowercase
     return None, None, None
 
 
@@ -206,6 +250,193 @@ def backup_pihole_toml():
     backup_path = f"{PIHOLE_TOML_PATH}.{ts}"
     shutil.copy2(PIHOLE_TOML_PATH, backup_path)
     print(f"🗄  Backup created: {backup_path}")
+
+
+def detect_conflicts(existing_entries, new_entries):
+    """
+    Detect conflicts between existing and new entries.
+    
+    Args:
+        existing_entries (set): Set of existing entries as tuples (mac, ip, hostname)
+        new_entries (set): Set of new entries as tuples (mac, ip, hostname)
+        
+    Returns:
+        dict: Dictionary containing:
+            - 'same': Entries that are identical in both sets
+            - 'ip_conflicts': IP conflicts (same IP, different details)
+            - 'mac_conflicts': MAC conflicts (same MAC, different IP)
+            - 'only_in_existing': Entries only in existing set
+            - 'only_in_new': Entries only in new set
+    """
+    # Categorize entries
+    same_entries = existing_entries & new_entries
+    
+    # Find IP conflicts
+    ip_conflicts = set()
+    existing_by_ip = {entry[1]: entry for entry in existing_entries}
+    new_by_ip = {entry[1]: entry for entry in new_entries}
+    
+    for ip, new_entry in new_by_ip.items():
+        if ip in existing_by_ip:
+            existing_entry = existing_by_ip[ip]
+            if new_entry != existing_entry:
+                ip_conflicts.add((new_entry, existing_entry))
+    
+    # Find MAC conflicts
+    mac_conflicts = set()
+    existing_by_mac = {entry[0].lower(): entry for entry in existing_entries if entry[0]}
+    new_by_mac = {entry[0].lower(): entry for entry in new_entries if entry[0]}
+    
+    for mac, new_entry in new_by_mac.items():
+        if mac in existing_by_mac:
+            existing_entry = existing_by_mac[mac]
+            if new_entry[1] != existing_entry[1]:  # Different IP with same MAC
+                mac_conflicts.add((new_entry, existing_entry))
+    
+    # Find hostname conflicts (same hostname, different IP or MAC)
+    hostname_conflicts = set()
+    existing_by_hostname = {}
+    new_by_hostname = {}
+    
+    for entry in existing_entries:
+        mac, ip, hostname = entry
+        if hostname not in existing_by_hostname:
+            existing_by_hostname[hostname] = []
+        existing_by_hostname[hostname].append(entry)
+        
+    for entry in new_entries:
+        mac, ip, hostname = entry
+        if hostname not in new_by_hostname:
+            new_by_hostname[hostname] = []
+        new_by_hostname[hostname].append(entry)
+    
+    # Find conflicts where same hostname exists in both but with different details
+    for hostname, new_entries_list in new_by_hostname.items():
+        if hostname in existing_by_hostname:
+            existing_entries_list = existing_by_hostname[hostname]
+            
+            # Compare each new entry with each existing entry for the same hostname
+            for new_entry in new_entries_list:
+                for existing_entry in existing_entries_list:
+                    new_mac, new_ip, new_hostname = new_entry
+                    existing_mac, existing_ip, existing_hostname = existing_entry
+                    
+                    # Skip if they're identical (already in same_entries)
+                    if new_entry == existing_entry:
+                        continue
+                    
+                    # Skip if this is already detected as an IP or MAC conflict
+                    if (new_entry, existing_entry) in ip_conflicts or (new_entry, existing_entry) in mac_conflicts:
+                        continue
+                    
+                    # Check for conflicts: same hostname but different IP or MAC
+                    # For hostname conflicts, we want cases where the hostname is the same but the IP/MAC differs
+                    if new_ip != existing_ip or new_mac != existing_mac:
+                        # But skip if this is already detected as an IP or MAC conflict to avoid duplicates
+                        if new_ip == existing_ip:
+                            # Same IP, different MAC - this is a MAC conflict, skip hostname conflict
+                            continue
+                        if new_mac == existing_mac:
+                            # Same MAC, different IP - this is a MAC conflict, skip hostname conflict
+                            continue
+                        # True hostname conflict: same hostname, different IP and MAC
+                        hostname_conflicts.add((new_entry, existing_entry))
+    
+    # Remove conflicts from "only" sets
+    conflict_ips = {new_entry[1] for new_entry, _ in ip_conflicts}
+    conflict_macs = {new_entry[0] for new_entry, _ in mac_conflicts if new_entry[0]}
+    conflict_hostnames = {new_entry[2] for new_entry, _ in hostname_conflicts}
+    
+    only_in_existing = {
+        entry for entry in existing_entries 
+        if entry not in same_entries 
+        and entry[1] not in conflict_ips 
+        and (not entry[0] or entry[0] not in conflict_macs)
+        and entry[2] not in conflict_hostnames
+    }
+    
+    only_in_new = {
+        entry for entry in new_entries 
+        if entry not in same_entries 
+        and entry[1] not in conflict_ips 
+        and (not entry[0] or entry[0] not in conflict_macs)
+        and entry[2] not in conflict_hostnames
+    }
+    
+    return {
+        'same': same_entries,
+        'ip_conflicts': ip_conflicts,
+        'mac_conflicts': mac_conflicts,
+        'hostname_conflicts': hostname_conflicts,
+        'only_in_existing': only_in_existing,
+        'only_in_new': only_in_new
+    }
+
+
+def get_pihole_entries_as_set(data):
+    """
+    Convert Pi-hole TOML data to a set of (mac, ip, hostname) tuples.
+    
+    Args:
+        data (dict): Parsed TOML data from Pi-hole
+        
+    Returns:
+        set: Set of entries as (mac, ip, hostname) tuples
+        
+    Note:
+        MAC addresses are normalized to uppercase for consistent comparison and storage
+        Hostnames are normalized to lowercase for consistent comparison
+        The parse_dhcp_entry function preserves MAC case, parse_dns_entry normalizes hostnames
+    """
+    entries = set()
+    
+    # Parse DHCP entries (these have MAC addresses)
+    for entry in data.get("dhcp", {}).get("hosts", []):
+        mac, ip, hostname = parse_dhcp_entry(entry)
+        if mac and ip and hostname:
+            # Normalize MAC to uppercase for consistent comparison
+            entries.add((mac.upper(), ip, hostname.lower()))
+    
+    # Parse DNS entries that don't have DHCP counterparts
+    dns_map = {}
+    for entry in data.get("dns", {}).get("hosts", []):
+        ip, fqdn, hostname = parse_dns_entry(entry)
+        if ip and hostname:
+            # parse_dns_entry already normalizes hostname to lowercase
+            dns_map[ip] = hostname
+    
+    # Add DNS-only entries (without MAC)
+    for ip, hostname in dns_map.items():
+        # Check if this IP already exists in DHCP entries
+        ip_in_dhcp = any(entry[1] == ip for entry in entries)
+        if not ip_in_dhcp:
+            entries.add(("", ip, hostname))  # hostname already normalized
+    
+    return entries
+
+
+def get_csv_entries_as_set(dhcp_hosts):
+    """
+    Convert CSV DHCP entries to a set of (mac, ip, hostname) tuples.
+    
+    Args:
+        dhcp_hosts (list): List of DHCP entries from CSV
+        
+    Returns:
+        set: Set of entries as (mac, ip, hostname) tuples
+        
+    Note:
+        MAC addresses are normalized to uppercase for consistent comparison and storage
+        Hostnames are normalized to lowercase for consistent comparison
+        The parse_dhcp_entry function preserves MAC case, parse_dns_entry normalizes hostnames
+    """
+    entries = set()
+    for entry in dhcp_hosts:
+        mac, ip, hostname = parse_dhcp_entry(entry)
+        if mac and ip and hostname:
+            # Normalize MAC to uppercase and hostname to lowercase for consistent comparison
+            entries.add((mac.upper(), ip, hostname.lower()))
+    return entries
 
 
 def audit_entries(input_file_path):
@@ -262,7 +493,7 @@ def audit_entries(input_file_path):
     for entry in pihole_dhcp_entries:
         mac, ip, hostname = parse_dhcp_entry(entry)
         if mac and ip and hostname:
-            pihole_entries.add((mac.lower(), ip, hostname.lower()))
+            pihole_entries.add((mac.upper(), ip, hostname.lower()))
 
     # Parse Pi-hole DNS entries that don't have DHCP counterparts
     pihole_dns_map = {}
@@ -284,71 +515,10 @@ def audit_entries(input_file_path):
         # Parse DHCP format: MAC,IP,Hostname
         mac, ip, hostname = parse_dhcp_entry(dhcp_hosts[i])
         if mac and ip and hostname:
-            csv_entries.add((mac.lower(), ip, hostname.lower()))
+            csv_entries.add((mac.upper(), ip, hostname.lower()))
 
-    # Categorize entries
-    same_entries = pihole_entries & csv_entries
-    conflicting_entries = set()
-    
-    # Find entries with same IP but different details
-    csv_by_ip = {entry[1]: entry for entry in csv_entries}
-    pihole_by_ip = {entry[1]: entry for entry in pihole_entries}
-    
-    for ip, csv_entry in csv_by_ip.items():
-        if ip in pihole_by_ip:
-            pihole_entry = pihole_by_ip[ip]
-            if csv_entry != pihole_entry:
-                conflicting_entries.add((csv_entry, pihole_entry, "same_ip"))
-
-    # Find entries with same hostname but different IPs or MACs
-    csv_by_hostname = {}
-    pihole_by_hostname = {}
-    
-    for entry in csv_entries:
-        mac, ip, hostname = entry
-        if hostname not in csv_by_hostname:
-            csv_by_hostname[hostname] = []
-        csv_by_hostname[hostname].append(entry)
-        
-    for entry in pihole_entries:
-        mac, ip, hostname = entry
-        if hostname not in pihole_by_hostname:
-            pihole_by_hostname[hostname] = []
-        pihole_by_hostname[hostname].append(entry)
-    
-    # Find hostname conflicts
-    for hostname, csv_entries_list in csv_by_hostname.items():
-        if hostname in pihole_by_hostname:
-            pihole_entries_list = pihole_by_hostname[hostname]
-            
-            # Compare each CSV entry with each Pi-hole entry for the same hostname
-            for csv_entry in csv_entries_list:
-                for pihole_entry in pihole_entries_list:
-                    csv_mac, csv_ip, csv_hostname = csv_entry
-                    pihole_mac, pihole_ip, pihole_hostname = pihole_entry
-                    
-                    # Skip if they're the same entry (already in same_entries)
-                    if csv_entry == pihole_entry:
-                        continue
-                    
-                    # Skip if this is already detected as an IP conflict
-                    if (csv_entry, pihole_entry, "same_ip") in conflicting_entries:
-                        continue
-                    
-                    # Check for conflicts: same hostname but different IP or MAC
-                    if csv_ip != pihole_ip or csv_mac != pihole_mac:
-                        conflicting_entries.add((csv_entry, pihole_entry, "same_hostname"))
-
-    only_in_pihole = pihole_entries - csv_entries
-    only_in_csv = csv_entries - pihole_entries
-
-    # Remove entries that are in conflicting_entries from the "only" sets
-    conflicting_ips = {csv_entry[1] for csv_entry, _, _ in conflicting_entries}
-    conflicting_hostnames = {csv_entry[2] for csv_entry, _, _ in conflicting_entries}
-    only_in_pihole = {entry for entry in only_in_pihole 
-                     if entry[1] not in conflicting_ips and entry[2] not in conflicting_hostnames}
-    only_in_csv = {entry for entry in only_in_csv 
-                  if entry[1] not in conflicting_ips and entry[2] not in conflicting_hostnames}
+    # Use common conflict detection
+    conflicts = detect_conflicts(pihole_entries, csv_entries)
 
     # Print results
     print("🔍 AUDIT RESULTS")
@@ -361,20 +531,21 @@ def audit_entries(input_file_path):
     print(f"Total entries in CSV file: {total_csv}")
     print()
     
-    print(f"🟢 SAME ENTRIES (all 3 fields match): {len(same_entries)}")
-    if same_entries:
-        for mac, ip, hostname in sorted(same_entries, key=lambda x: x[1]):
+    print(f"🟢 SAME ENTRIES (all 3 fields match): {len(conflicts['same'])}")
+    if conflicts['same']:
+        for mac, ip, hostname in sorted(conflicts['same'], key=lambda x: x[1]):
             print(f"{mac.upper() if mac else '(no MAC)'},{ip},{hostname}")
     
-    if conflicting_entries:
-        print(f"\n🟡 CONFLICTING ENTRIES: {len(conflicting_entries)}")
+    all_conflicts = conflicts['ip_conflicts'] | conflicts['mac_conflicts'] | conflicts['hostname_conflicts']
+    if all_conflicts:
+        print(f"\n🟡 CONFLICTING ENTRIES: {len(all_conflicts)}")
         print("CSV:")
         
         # Collect and sort all CSV entries
         csv_entries_list = []
         pihole_entries_list = []
         
-        for csv_entry, pihole_entry, _ in sorted(conflicting_entries, key=lambda x: (x[0][2], x[0][1])):
+        for csv_entry, pihole_entry in sorted(all_conflicts, key=lambda x: (x[0][2], x[0][1])):
             csv_mac, csv_ip, csv_hostname = csv_entry
             csv_entries_list.append(f"{csv_mac.upper() if csv_mac else '(no MAC)'},{csv_ip},{csv_hostname}")
             
@@ -388,16 +559,20 @@ def audit_entries(input_file_path):
         print("\nPI-HOLE:")
         # Print all Pi-hole entries
         for pihole_entry in pihole_entries_list:
-            print(pihole_entry)
+            # Replace "(no MAC)" with "[Missing MAC address]" for consistency
+            formatted_entry = pihole_entry.replace("(no MAC)", "[Missing MAC address]")
+            print(formatted_entry)
         print()
     
-    print(f"\n🔴 ONLY IN PI-HOLE: {len(only_in_pihole)}")
-    for mac, ip, hostname in sorted(only_in_pihole, key=lambda x: x[1]):
-        print(f"{mac.upper() if mac else '(no MAC)'},{ip},{hostname}")
+    print(f"\n🔴 ONLY IN PI-HOLE: {len(conflicts['only_in_existing'])}")
+    for mac, ip, hostname in sorted(conflicts['only_in_existing'], key=lambda x: x[1]):
+        formatted_mac = "[Missing MAC address]" if not mac else mac.upper()
+        print(f"{formatted_mac},{ip},{hostname}")
     
-    print(f"\n🔵 ONLY IN CSV FILE: {len(only_in_csv)}")
-    for mac, ip, hostname in sorted(only_in_csv, key=lambda x: x[1]):
-        print(f"{mac.upper() if mac else '(no MAC)'},{ip},{hostname}")
+    print(f"\n🔵 ONLY IN CSV FILE: {len(conflicts['only_in_new'])}")
+    for mac, ip, hostname in sorted(conflicts['only_in_new'], key=lambda x: x[1]):
+        formatted_mac = "[Missing MAC address]" if not mac else mac.upper()
+        print(f"{formatted_mac},{ip},{hostname}")
     
     print("\n" + "=" * 50)
     print("AUDIT COMPLETE")
@@ -451,8 +626,8 @@ def export_pihole_entries():
         # Check if this IP already exists in our export (from DHCP)
         ip_exists = any(entry.startswith(f",{ip},") or entry.split(",")[1] == ip for entry in export_entries)
         if not ip_exists:
-            # For DNS-only entries, we don't have a MAC, so skip them
-            continue
+            # For DNS-only entries, we don't have a MAC, so use empty MAC field
+            export_entries.append(f",{ip},{hostname}")
 
     if not export_entries:
         print("No entries found to export.", file=sys.stderr)
@@ -509,64 +684,162 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
     # --- DNS Processing ---
     data.setdefault("dns", {})
     data["dns"].setdefault("hosts", [])
-    
-    # Map IP -> full_entry_string
+
+    # Map IP -> full_entry_string for existing DNS entries
     existing_dns_map = {}
     for entry in data["dns"]["hosts"]:
         ip, _, _ = parse_dns_entry(entry)
         if ip:
             existing_dns_map[ip] = entry
 
-    dns_to_add = {}
-    dns_conflicts = []
-
-    for new_entry in dns_hosts:
-        new_ip, _, new_host = parse_dns_entry(new_entry)
-        if not new_ip:
-            continue
-
-        if new_ip in existing_dns_map:
-            old_entry = existing_dns_map[new_ip]
-            if old_entry != new_entry:
-                dns_conflicts.append((new_ip, "DNS", old_entry, new_entry))
-            # If identical, do nothing (idempotent)
-        else:
-            dns_to_add[new_ip] = new_entry
-
     # --- DHCP Processing ---
     data.setdefault("dhcp", {})
     data["dhcp"].setdefault("hosts", [])
 
-    # Map IP -> full_entry_string
+    # Map MAC -> full_entry_string for existing DHCP entries (MAC is the true key for DHCP)
     existing_dhcp_map = {}
     for entry in data["dhcp"]["hosts"]:
-        _, ip, _ = parse_dhcp_entry(entry)
-        if ip:
-            existing_dhcp_map[ip] = entry
+        mac, ip, _ = parse_dhcp_entry(entry)
+        if mac:
+            existing_dhcp_map[mac] = entry
 
-    dhcp_to_add = {}
+    # --- Use common conflict detection ---
+    pihole_entries = get_pihole_entries_as_set(data)
+    csv_entries = get_csv_entries_as_set(dhcp_hosts)
+    
+    conflicts = detect_conflicts(pihole_entries, csv_entries)
+    
+    # Convert conflicts back to the format expected by the rest of the function
+    dns_conflicts = []
     dhcp_conflicts = []
-
-    for new_entry in dhcp_hosts:
-        _, new_ip, _ = parse_dhcp_entry(new_entry)
-        if not new_ip:
-            continue
-
-        if new_ip in existing_dhcp_map:
-            old_entry = existing_dhcp_map[new_ip]
-            if old_entry != new_entry:
-                dhcp_conflicts.append((new_ip, "DHCP", old_entry, new_entry))
+    
+    # Process all conflicts (IP, MAC, and hostname)
+    for new_entry, existing_entry in conflicts['ip_conflicts'] | conflicts['mac_conflicts'] | conflicts['hostname_conflicts']:
+        new_mac, new_ip, new_hostname = new_entry
+        existing_mac, existing_ip, existing_hostname = existing_entry
+        
+        # Create new entry string
+        new_entry_str = f"{new_mac},{new_ip},{new_hostname}"
+        
+        # Determine conflict type
+        if (new_entry, existing_entry) in conflicts['ip_conflicts']:
+            conflict_type = "ip_conflict"
+        elif (new_entry, existing_entry) in conflicts['mac_conflicts']:
+            conflict_type = "mac_conflict"
         else:
-            dhcp_to_add[new_ip] = new_entry
+            conflict_type = "hostname_conflict"
+        
+        # Find the existing entry string in the TOML data (look for matching MAC in DHCP entries)
+        existing_entry_str = None
+        for entry in data.get("dhcp", {}).get("hosts", []):
+            e_mac, e_ip, e_hostname = parse_dhcp_entry(entry)
+            if e_mac == existing_mac:
+                existing_entry_str = entry
+                break
+        
+        # If no DHCP entry found, look for DNS-only entries
+        if not existing_entry_str:
+            for entry in data.get("dns", {}).get("hosts", []):
+                e_ip, e_fqdn, e_hostname = parse_dns_entry(entry)
+                if e_ip == existing_ip and e_hostname == existing_hostname:
+                    # Create a synthetic DHCP entry for display purposes
+                    existing_entry_str = f"{existing_mac},{existing_ip},{existing_hostname}"
+                    break
+        
+        if existing_entry_str:
+            dhcp_conflicts.append((new_ip, "DHCP", existing_entry_str, new_entry_str, conflict_type))
+    
+    # Prepare entries to add (non-conflicting entries from CSV)
+    dns_to_add = {}
+    dhcp_to_add = {}
+    
+    for entry in conflicts['only_in_new']:
+        mac, ip, hostname = entry
+        if mac:  # Only add entries with MAC addresses (DHCP entries)
+            dns_entry = f"{ip} {hostname}.{DOMAIN} {hostname}"
+            dhcp_entry = f"{mac},{ip},{hostname}"
+            dns_to_add[ip] = dns_entry
+            dhcp_to_add[ip] = dhcp_entry
 
     # --- Handle Conflicts ---
     all_conflicts = dns_conflicts + dhcp_conflicts
     if all_conflicts:
-        print("\n⚠️  Found conflicting entries for existing IP addresses:")
-        for ip, kind, old, new in all_conflicts:
-            print(f"   [{kind}] IP: {ip}")
-            print(f"      Current: {old}")
-            print(f"      New:     {new}")
+        print("\n⚠️  Found conflicting entries:")
+        
+        ip_conflicts = []
+        mac_conflicts = []
+        
+        # Separate conflicts by type
+        for conflict in all_conflicts:
+            if len(conflict) == 5 and conflict[4] == "mac_conflict":
+                mac_conflicts.append(conflict)
+            else:
+                ip_conflicts.append(conflict)
+        
+        # Show IP conflicts with DNS transparency
+        if ip_conflicts:
+            print("\nIP Address Conflicts (Current vs. Proposed):")
+            for conflict in ip_conflicts:
+                if len(conflict) == 4:
+                    ip, kind, old, new = conflict
+                    conflict_type = "ip_conflict"
+                else:
+                    ip, kind, old, new, conflict_type = conflict
+                
+                # Pull current DNS mapping if it exists
+                current_dns = existing_dns_map.get(ip, "[No existing DNS]")
+                new_mac, new_ip, new_hostname = parse_dhcp_entry(new)
+                new_dns = f"{new_ip} {new_hostname}.{DOMAIN} {new_hostname}"
+                
+                # Parse old entry to get MAC
+                old_mac, old_ip, old_hostname = parse_dhcp_entry(old)
+                
+                # Format old entry with proper MAC display (uppercase)
+                if old_mac:
+                    formatted_old = f"{old_mac.upper()},{old_ip},{old_hostname}"
+                else:
+                    formatted_old = f"[Missing MAC address],{old_ip},{old_hostname}"
+                
+                print(f"   IP: {ip}")
+                print(f"      Current: {formatted_old} (DNS: {current_dns})")
+                print(f"      Proposed: {new} (DNS: {new_dns})")
+        
+        # Show MAC conflicts with DNS transparency
+        if mac_conflicts:
+            print("\nMAC Address Conflicts (Current vs. Proposed):")
+            for ip, kind, old, new, conflict_type in mac_conflicts:
+                new_mac, new_ip, new_hostname = parse_dhcp_entry(new)
+                old_mac, old_ip, old_hostname = parse_dhcp_entry(old)
+                
+                # Pull current DNS mapping if it exists - use old_ip to find DNS for current entry
+                current_dns = existing_dns_map.get(old_ip, "[No existing DNS]")
+                new_dns = f"{new_ip} {new_hostname}.{DOMAIN} {new_hostname}"
+                
+                print(f"   MAC: {new_mac}")
+                print(f"      Current: {old_mac} -> {old_ip} (DNS: {current_dns})")
+                print(f"      Proposed: {new_mac} -> {new_ip} (DNS: {new_dns})")
+        
+        # Show hostname conflicts with DNS transparency
+        hostname_conflicts_list = [c for c in all_conflicts if len(c) == 5 and c[4] == "hostname_conflict"]
+        if hostname_conflicts_list:
+            print("\nHostname Conflicts (same hostname, different IP/MAC):")
+            for ip, kind, old, new, conflict_type in hostname_conflicts_list:
+                new_mac, new_ip, new_hostname = parse_dhcp_entry(new)
+                old_mac, old_ip, _ = parse_dhcp_entry(old)
+                
+                # Pull current DNS mapping if it exists
+                current_dns = existing_dns_map.get(ip, "No existing DNS")
+                new_dns = f"{new_ip} {new_hostname}.{DOMAIN} {new_hostname}"
+                
+                # Format old entry with proper MAC display
+                if old_mac:
+                    formatted_old = f"{old_mac} -> {old_ip}"
+                else:
+                    formatted_old = f"[Missing MAC address] -> {old_ip}"
+                
+                print(f"   Hostname: {new_hostname}")
+                print(f"      Current: {formatted_old} (DNS: {current_dns})")
+                print(f"      Proposed: {new_mac} -> {new_ip} (DNS: {new_dns})")
         
         response = input("\nDo you want to overwrite these entries with the new values? [y/N] ").strip().lower()
         if response != 'y':
@@ -574,11 +847,28 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
             sys.exit(0)
         
         # User confirmed, add conflicts to the "to_add" maps (overwriting logic below will handle it)
-        for ip, kind, _, new_entry in all_conflicts:
-            if kind == "DNS":
-                dns_to_add[ip] = new_entry
-            elif kind == "DHCP":
-                dhcp_to_add[ip] = new_entry
+        for conflict in all_conflicts:
+            # conflicts can be either:
+            # - (new_entry, existing_entry) for simple conflicts
+            # - (ip, kind, old_entry, new_entry, conflict_type) for more complex ones
+            if len(conflict) == 2:
+                # Simple conflict: (new_entry, existing_entry)
+                new_entry, existing_entry = conflict
+                new_mac, new_ip, new_hostname = new_entry
+            else:
+                # Complex conflict: (ip, kind, old_entry, new_entry, conflict_type)
+                _, _, _, new_entry, _ = conflict
+                new_mac, new_ip, new_hostname = parse_dhcp_entry(new_entry)
+            
+            # For conflicts, we need to update both DNS and DHCP to ensure consistency
+            # Create the DNS entry string
+            dns_entry = f"{new_ip} {new_hostname}.{DOMAIN} {new_hostname}"
+            # Create the DHCP entry string  
+            dhcp_entry = f"{new_mac},{new_ip},{new_hostname}"
+            
+            # Add to both maps to ensure consistency
+            dns_to_add[new_ip] = dns_entry
+            dhcp_to_add[new_ip] = dhcp_entry
 
     # --- Apply Updates ---
     
@@ -586,17 +876,85 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
     for ip, entry in dns_to_add.items():
         existing_dns_map[ip] = entry
         
-    for ip, entry in dhcp_to_add.items():
-        existing_dhcp_map[ip] = entry
-
-    # 2. Convert back to lists
-    # We want to preserve order somewhat, or just dump values. 
-    # To keep it loosely stable, we could carry over the original list, 
-    # but since we might be overwriting, rebuilding from the map is safer to ensure uniqueness by IP.
-    # However, to be nice to the file structure, maybe we just append new ones and find/replace existing logic? 
-    # Rebuilding from map is easiest to guarantee idempotency and no duplicates.
+    for mac, entry in dhcp_to_add.items():
+        # Extract MAC from the entry to use as key
+        entry_mac, _, _ = parse_dhcp_entry(entry)
+        existing_dhcp_map[entry_mac] = entry
     
-    data["dns"]["hosts"] = list(existing_dns_map.values())
+    # 1.5. Remove old entries that were overwritten by conflicts
+    # When we resolve conflicts, we need to remove the old entries from existing_dns_map
+    # so they don't get added back in the final construction
+    for conflict in all_conflicts:
+        if len(conflict) == 2:
+            new_entry, existing_entry = conflict
+            old_ip = existing_entry[1]  # IP from existing entry
+        else:
+            _, _, old_entry, _, _ = conflict
+            old_ip = parse_dhcp_entry(old_entry)[1]  # IP from old entry
+        
+        # Remove the old entry from existing_dns_map if it exists
+        if old_ip in existing_dns_map:
+            del existing_dns_map[old_ip]
+
+    # 2. Convert back to lists with preservation of DNS-only entries
+    # We want to preserve:
+    # - All existing DNS entries that don't conflict with new entries
+    # - All new DNS entries from the CSV (including conflict resolutions)
+    # - All existing DNS-only entries (entries without corresponding DHCP)
+    
+    # Use a dictionary with IP as key to ensure 1:1 relationship and prevent case-sensitive duplicates
+    final_dns_entries_dict = {}
+    
+    # Start with all existing DNS entries that don't conflict
+    for ip, entry in existing_dns_map.items():
+        # Normalize hostname to lowercase in the entry
+        parts = entry.split()
+        if len(parts) >= 3:
+            original_ip, original_fqdn, original_hostname = parts[0], parts[1], parts[2]
+            # Reconstruct with normalized hostname
+            normalized_entry = f"{original_ip} {original_fqdn} {original_hostname.lower()}"
+            final_dns_entries_dict[original_ip] = normalized_entry
+    
+    # Add new DNS entries from non-conflicting CSV entries
+    for entry in conflicts['only_in_new']:
+        mac, ip, hostname = entry
+        if mac:  # Only add entries with MAC addresses (DHCP entries)
+            dns_entry = f"{ip} {hostname.lower()}.{DOMAIN} {hostname.lower()}"
+            final_dns_entries_dict[ip] = dns_entry  # This will overwrite any existing entry for this IP
+    
+    # Add DNS entries from conflict resolutions (these should overwrite any existing entries)
+    for ip, dns_entry in dns_to_add.items():
+        final_dns_entries_dict[ip] = dns_entry
+    
+    # Preserve existing DNS-only entries (entries that were in original TOML but not in DHCP)
+    original_dns_entries = data["dns"]["hosts"]
+    for original_entry in original_dns_entries:
+        original_ip, original_fqdn, original_hostname = parse_dns_entry(original_entry)
+        if original_ip:
+            # Check if this is a DNS-only entry (no corresponding DHCP entry)
+            dns_only = True
+            for dhcp_entry in data["dhcp"]["hosts"]:
+                dhcp_mac, dhcp_ip, dhcp_hostname = parse_dhcp_entry(dhcp_entry)
+                if dhcp_ip == original_ip:
+                    dns_only = False
+                    break
+            
+            # If it's DNS-only and not already in our final dict, preserve it
+            if dns_only and original_ip not in final_dns_entries_dict:
+                # But only if it doesn't conflict with new entries
+                conflict_found = False
+                for new_entry in conflicts['only_in_new']:
+                    new_mac, new_ip, new_hostname = new_entry
+                    if new_ip == original_ip:
+                        conflict_found = True
+                        break
+                
+                if not conflict_found:
+                    # Normalize hostname to lowercase
+                    normalized_entry = f"{original_ip} {original_fqdn} {original_hostname.lower()}"
+                    final_dns_entries_dict[original_ip] = normalized_entry
+    
+    data["dns"]["hosts"] = list(final_dns_entries_dict.values())
     data["dhcp"]["hosts"] = list(existing_dhcp_map.values())
 
     backup_pihole_toml()
@@ -611,8 +969,6 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
     print(f"✅ Updated {PIHOLE_TOML_PATH}")
     print(f"   DNS entries count:  {len(data['dns']['hosts'])}")
     print(f"   DHCP entries count: {len(data['dhcp']['hosts'])}")
-    print("   Restarting Pi-hole FTL...")
-
     print("   Restarting Pi-hole FTL...")
 
     subprocess.run(["systemctl", "restart", "pihole-FTL.service"], check=False)
