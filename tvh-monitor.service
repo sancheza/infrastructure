@@ -1,0 +1,13 @@
+# systemd service to monitor tvheadend and send alerts to uptime kuma
+[Unit]
+Description=Tvheadend Monitor
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash /usr/local/bin/tvh_kuma_monitor.sh
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
