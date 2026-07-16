@@ -654,6 +654,51 @@ def export_pihole_entries():
         sys.exit(1)
 
 
+def validate_toml_integrity(data):
+    """
+    Sanity-check an in-memory Pi-hole config before it is written to disk.
+
+    Catches the failure modes that would otherwise only surface when
+    pihole-FTL tries to load the file (e.g. duplicate MACs/IPs producing
+    conflicting DHCP reservations), plus a round-trip serialize/parse check
+    so a structurally broken TOML document is caught before it overwrites
+    the live config.
+
+    Raises:
+        ValueError: describing the first problem found.
+    """
+    dhcp_hosts = data.get("dhcp", {}).get("hosts", [])
+    dns_hosts = data.get("dns", {}).get("hosts", [])
+
+    seen_macs = set()
+    seen_dhcp_ips = set()
+    for entry in dhcp_hosts:
+        mac, ip, hostname = parse_dhcp_entry(entry)
+        if not mac or not ip or not hostname:
+            raise ValueError(f"Malformed dhcp.hosts entry: {entry!r}")
+        if mac.upper() in seen_macs:
+            raise ValueError(f"Duplicate MAC address in dhcp.hosts: {mac}")
+        if ip in seen_dhcp_ips:
+            raise ValueError(f"Duplicate IP address in dhcp.hosts: {ip}")
+        seen_macs.add(mac.upper())
+        seen_dhcp_ips.add(ip)
+
+    seen_dns_ips = set()
+    for entry in dns_hosts:
+        ip, fqdn, hostname = parse_dns_entry(entry)
+        if not ip or not fqdn or not hostname:
+            raise ValueError(f"Malformed dns.hosts entry: {entry!r}")
+        if ip in seen_dns_ips:
+            raise ValueError(f"Duplicate IP address in dns.hosts: {ip}")
+        seen_dns_ips.add(ip)
+
+    # Round-trip through the TOML serializer to make sure the result actually parses.
+    try:
+        toml.loads(toml.dumps(data))
+    except Exception as e:
+        raise ValueError(f"Generated TOML failed to round-trip parse: {e}")
+
+
 def update_pihole_toml(dns_hosts, dhcp_hosts):
     """
     Update Pi-hole TOML configuration with new DNS and DHCP entries.
@@ -697,11 +742,13 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
     data["dhcp"].setdefault("hosts", [])
 
     # Map MAC -> full_entry_string for existing DHCP entries (MAC is the true key for DHCP)
+    # Keys are normalized to uppercase so lookups/removals agree with the CSV-derived
+    # entries, which are always uppercase (see parse_reservations()).
     existing_dhcp_map = {}
     for entry in data["dhcp"]["hosts"]:
         mac, ip, _ = parse_dhcp_entry(entry)
         if mac:
-            existing_dhcp_map[mac] = entry
+            existing_dhcp_map[mac.upper()] = entry
 
     # --- Use common conflict detection ---
     pihole_entries = get_pihole_entries_as_set(data)
@@ -730,10 +777,12 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
             conflict_type = "hostname_conflict"
         
         # Find the existing entry string in the TOML data (look for matching MAC in DHCP entries)
+        # existing_mac is normalized uppercase; compare case-insensitively since
+        # Pi-hole often stores MACs lowercase on disk.
         existing_entry_str = None
         for entry in data.get("dhcp", {}).get("hosts", []):
             e_mac, e_ip, e_hostname = parse_dhcp_entry(entry)
-            if e_mac == existing_mac:
+            if e_mac and e_mac.upper() == existing_mac:
                 existing_entry_str = entry
                 break
         
@@ -855,20 +904,29 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
                 # Simple conflict: (new_entry, existing_entry)
                 new_entry, existing_entry = conflict
                 new_mac, new_ip, new_hostname = new_entry
+                old_mac, _, _ = existing_entry
             else:
                 # Complex conflict: (ip, kind, old_entry, new_entry, conflict_type)
-                _, _, _, new_entry, _ = conflict
+                _, _, old_entry, new_entry, _ = conflict
                 new_mac, new_ip, new_hostname = parse_dhcp_entry(new_entry)
-            
+                old_mac, _, _ = parse_dhcp_entry(old_entry)
+
             # For conflicts, we need to update both DNS and DHCP to ensure consistency
             # Create the DNS entry string
             dns_entry = f"{new_ip} {new_hostname}.{DOMAIN} {new_hostname}"
-            # Create the DHCP entry string  
+            # Create the DHCP entry string
             dhcp_entry = f"{new_mac},{new_ip},{new_hostname}"
-            
+
             # Add to both maps to ensure consistency
             dns_to_add[new_ip] = dns_entry
             dhcp_to_add[new_ip] = dhcp_entry
+
+            # If the MAC changed for this IP/hostname, drop the stale entry that is
+            # still sitting under the old MAC key so it doesn't survive into the
+            # final dhcp.hosts list alongside the new one. This was the cause of
+            # duplicate DHCP entries when a MAC address was changed in the source file.
+            if old_mac and old_mac.upper() != new_mac.upper():
+                existing_dhcp_map.pop(old_mac.upper(), None)
 
     # --- Apply Updates ---
     
@@ -957,13 +1015,29 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
     data["dns"]["hosts"] = list(final_dns_entries_dict.values())
     data["dhcp"]["hosts"] = list(existing_dhcp_map.values())
 
+    try:
+        validate_toml_integrity(data)
+    except ValueError as e:
+        print(f"❌ Integrity check failed: {e}", file=sys.stderr)
+        print("   No changes were made to the live configuration.", file=sys.stderr)
+        sys.exit(1)
+
     backup_pihole_toml()
 
+    # Write to a temp file and atomically swap it into place, so a crash or
+    # error mid-write can never leave a half-written pihole.toml on disk.
+    tmp_path = f"{PIHOLE_TOML_PATH}.tmp"
     try:
-        with open(PIHOLE_TOML_PATH, "w") as f:
+        orig_stat = os.stat(PIHOLE_TOML_PATH)
+        with open(tmp_path, "w") as f:
             toml.dump(data, f)
+        os.chmod(tmp_path, orig_stat.st_mode)
+        os.chown(tmp_path, orig_stat.st_uid, orig_stat.st_gid)
+        os.replace(tmp_path, PIHOLE_TOML_PATH)
     except Exception as e:
         print(f"Error writing TOML: {e}", file=sys.stderr)
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
         sys.exit(1)
 
     print(f"✅ Updated {PIHOLE_TOML_PATH}")
