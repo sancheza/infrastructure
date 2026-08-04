@@ -305,26 +305,27 @@ SEP_EQ=$(printf '=%.0s' $(seq 1 "$WIDTH"))
 SEP_DASH=$(printf -- '-%.0s' $(seq 1 "$WIDTH"))
 
 # --- Print the static header + Key once; the live dashboard redraws below it ---
-STATIC_LINE_COUNT=0
-print_static_line() {
-    echo "$1"
-    STATIC_LINE_COUNT=$((STATIC_LINE_COUNT + 1))
-}
-
-print_static_line "$TITLE"
-print_static_line "$PLATFORM_LINE"
-print_static_line "$SEP_EQ"
+echo "$TITLE"
+echo "$PLATFORM_LINE"
+echo "$SEP_EQ"
 for line in "${DESC_LINES[@]}"; do
-    print_static_line "$line"
+    echo "$line"
 done
-print_static_line "$SEP_EQ"
-print_static_line "$KEY_HEADING"
+echo "$SEP_EQ"
+echo "$KEY_HEADING"
 for i in "${!CAT_NAME[@]}"; do
     printf "  ${CAT_COLOR[$i]}%-10s${RESET} %-15s - %s\n" "${CAT_NAME[$i]}" "${CAT_RANGE[$i]}" "${CAT_DESC[$i]}"
-    STATIC_LINE_COUNT=$((STATIC_LINE_COUNT + 1))
 done
-print_static_line "$SEP_EQ"
-DASHBOARD_ROW=$STATIC_LINE_COUNT  # live region starts right after the static header
+echo "$SEP_EQ"
+
+# The live region is 5 lines (Current RSSI, separator, Samples, stats, separator).
+# Cursor is repositioned *relatively* (cursor-up N lines) rather than to an
+# absolute row, since an absolute `tput cup` breaks if the terminal has had
+# to scroll to fit the header + dashboard - it would then point at whatever
+# now occupies that row instead of the live region, and every redraw appends
+# a new block instead of overwriting the last one.
+DASHBOARD_LINES=5
+first_frame=1
 
 while true; do
     rssi=$(get_rssi)
@@ -336,7 +337,11 @@ while true; do
 
     read -r min max mean median stddev <<< "$(compute_stats)"
 
-    tput cup "$DASHBOARD_ROW" 0
+    if (( first_frame )); then
+        first_frame=0
+    else
+        tput cuu "$DASHBOARD_LINES"
+    fi
     tput el
     if [[ -n "$rssi" ]]; then
         color=$(color_for_rssi "$rssi")
