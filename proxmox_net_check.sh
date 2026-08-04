@@ -92,7 +92,7 @@ fi
 
 # --- Main Script Logic ---
 # Use seq to generate the range of IDs and ensure proper iteration logic
-for ID in $(seq $START_ID $END_ID); do
+for ID in $(seq "$START_ID" "$END_ID"); do
     CONFIG_FILE="/etc/pve/lxc/${ID}.conf"
     
     # Check if the configuration file for the CTID exists

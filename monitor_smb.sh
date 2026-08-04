@@ -23,6 +23,13 @@
 INTERVAL=5  # seconds between polls
 WIFI_INTERFACE="en0"  # adjust if your Wi-Fi interface is different
 
+# The airport tool below always reads the system's default Wi-Fi interface and
+# has no option to target a specific one, so this is a sanity check rather
+# than a live parameter: warn if it doesn't match what's actually configured.
+if ! ifconfig "$WIFI_INTERFACE" >/dev/null 2>&1; then
+    echo "Warning: interface '$WIFI_INTERFACE' not found. Wi-Fi stats below always come from the system's default Wi-Fi interface, which may differ." >&2
+fi
+
 echo "Monitoring SMB shares and Wi-Fi signal (Ctrl+C to stop)..."
 
 # Trap Ctrl+C to exit cleanly
