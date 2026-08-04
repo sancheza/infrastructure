@@ -3,11 +3,27 @@
 # ==============================================================================
 # Script Name: check_wifi.sh
 # Description:
-#   Continuously monitors and displays the Wi-Fi Received Signal Strength
-#   Indicator (RSSI) on macOS systems, updating a live dashboard in place
-#   (rather than scrolling), along with running session statistics
-#   (min / max / mean / median / std dev). This script uses the `wdutil`
-#   diagnostic tool to fetch real-time Wi-Fi metrics.
+#   Continuously monitors and displays Wi-Fi signal strength (RSSI, in dBm)
+#   as a live, in-place dashboard (not scrolling rows), with running session
+#   stats (min / max / mean / median / std dev) and a color-coded quality key.
+#
+#   Works on:
+#     - macOS   : via `wdutil info` (requires sudo). Real dBm.
+#     - Linux   : via `iw` or `iwconfig` (no sudo needed). Real dBm.
+#                 Falls back to `nmcli` (no sudo needed) if neither is
+#                 installed, which only reports a 0-100% signal quality;
+#                 that gets converted to an *approximate* dBm.
+#     - Windows : via Git Bash, MSYS2, Cygwin, or WSL, by shelling out to
+#                 `netsh.exe wlan show interfaces`. Native cmd.exe/PowerShell
+#                 cannot run this script directly - bash has to come from
+#                 one of those environments. Windows only exposes a 0-100%
+#                 signal quality (no true dBm), so the value shown is an
+#                 *approximate* conversion. Assumes an English-language
+#                 Windows install (parses the "Signal" label in netsh output).
+#
+#   Approximate readings (Windows, and the Linux nmcli fallback) are marked
+#   with "~" next to the value, since they're derived from a 0-100% signal
+#   quality reading rather than a direct radio dBm measurement.
 #
 #   Signal quality reference (RSSI is in dBm; values closer to 0 are better):
 #     Excellent : >= -50 dBm         - as strong as it gets
@@ -23,22 +39,98 @@
 #   - Monitoring signal stability over time.
 #
 # Usage:
-#   sudo ./check_wifi.sh
-#
-#   Note: This script requires `sudo` privileges because `wdutil` interacts
-#   directly with the wireless diagnostics subsystem.
+#   macOS:         sudo ./check_wifi.sh
+#   Linux/Windows: ./check_wifi.sh   (no sudo needed)
 #
 # Requirements:
-#   - macOS
-#   - Root/Sudo privileges
+#   - macOS (root) with wdutil, OR
+#   - Linux with iw, iwconfig, or nmcli, OR
+#   - Windows, run from WSL, Git Bash, MSYS2, or Cygwin, with netsh.exe
+#     reachable (either on PATH or at /mnt/c/Windows/System32/netsh.exe).
 #
 # ==============================================================================
 
-# Ensure the script is run with sudo
-if [ "$EUID" -ne 0 ]; then
-  echo "Error: This script must be run as root. Please use 'sudo $0'."
-  exit 1
-fi
+detect_platform() {
+    case "$(uname -s)" in
+        Darwin) echo "macos" ;;
+        Linux)
+            if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+                echo "wsl"
+            else
+                echo "linux"
+            fi
+            ;;
+        MINGW*|MSYS*|CYGWIN*) echo "windows" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+PLATFORM=$(detect_platform)
+WIFI_IFACE=""
+NETSH_BIN=""
+PLATFORM_LABEL=""
+SOURCE_IS_APPROX=0
+
+case "$PLATFORM" in
+    macos)
+        if [ "$EUID" -ne 0 ]; then
+            echo "Error: This script must be run as root on macOS (wdutil requires it)."
+            echo "Please use: sudo $0"
+            exit 1
+        fi
+        if ! command -v wdutil >/dev/null 2>&1; then
+            echo "Error: 'wdutil' not found (expected on macOS)."
+            exit 1
+        fi
+        PLATFORM_LABEL="macOS (wdutil)"
+        ;;
+    linux)
+        if command -v iw >/dev/null 2>&1; then
+            WIFI_IFACE=$(iw dev 2>/dev/null | awk '$1=="Interface"{print $2; exit}')
+        fi
+        if [[ -z "$WIFI_IFACE" ]]; then
+            for d in /sys/class/net/*/wireless; do
+                [[ -d "$d" ]] || continue
+                WIFI_IFACE=$(basename "$(dirname "$d")")
+                break
+            done
+        fi
+        if command -v iw >/dev/null 2>&1 && [[ -n "$WIFI_IFACE" ]]; then
+            PLATFORM_LABEL="Linux (iw, $WIFI_IFACE)"
+        elif command -v iwconfig >/dev/null 2>&1 && [[ -n "$WIFI_IFACE" ]]; then
+            PLATFORM_LABEL="Linux (iwconfig, $WIFI_IFACE)"
+        elif command -v nmcli >/dev/null 2>&1; then
+            PLATFORM_LABEL="Linux (nmcli, ~approx. from signal %)"
+            SOURCE_IS_APPROX=1
+        else
+            echo "Error: No Wi-Fi tool found. Install one of: iw, iwconfig (wireless-tools), or nmcli (NetworkManager)."
+            echo "  Debian/Ubuntu: sudo apt install iw"
+            echo "  Fedora:        sudo dnf install iw"
+            exit 1
+        fi
+        ;;
+    wsl|windows)
+        if command -v netsh.exe >/dev/null 2>&1; then
+            NETSH_BIN="netsh.exe"
+        elif [[ -x /mnt/c/Windows/System32/netsh.exe ]]; then
+            NETSH_BIN="/mnt/c/Windows/System32/netsh.exe"
+        else
+            echo "Error: 'netsh.exe' not found. This script needs Windows' netsh to read Wi-Fi signal."
+            exit 1
+        fi
+        if [[ "$PLATFORM" == "wsl" ]]; then
+            PLATFORM_LABEL="Windows via WSL (netsh, ~approx. from signal %)"
+        else
+            PLATFORM_LABEL="Windows via Git Bash/MSYS/Cygwin (netsh, ~approx. from signal %)"
+        fi
+        SOURCE_IS_APPROX=1
+        ;;
+    *)
+        echo "Error: Unsupported platform ($(uname -s))."
+        echo "This script supports macOS, Linux, and Windows (via WSL, Git Bash, MSYS2, or Cygwin)."
+        exit 1
+        ;;
+esac
 
 # --- Signal thresholds (dBm) - tune to taste ---
 RSSI_EXCELLENT=-50   # >= this is "Excellent"
@@ -105,6 +197,40 @@ rating_for_rssi() {
     fi
 }
 
+# Fetches one RSSI reading (dBm, integer) for the detected platform.
+# Whether the value is a direct radio dBm reading or an approximation from a
+# 0-100% signal quality reading is fixed per-platform in SOURCE_IS_APPROX
+# (set once during preflight) - not tracked here, since this function is
+# always invoked as `rssi=$(get_rssi)`, and a command-substitution subshell
+# can't hand a variable assignment back to the caller.
+get_rssi() {
+    local val pct
+
+    case "$PLATFORM" in
+        macos)
+            val=$(wdutil info 2>/dev/null | grep -m1 -E 'RSSI' | grep -oE -- '-?[0-9]+' | head -1)
+            ;;
+        linux)
+            if command -v iw >/dev/null 2>&1 && [[ -n "$WIFI_IFACE" ]]; then
+                val=$(iw dev "$WIFI_IFACE" link 2>/dev/null | awk '/signal:/{print $2; exit}')
+            fi
+            if [[ -z "$val" ]] && command -v iwconfig >/dev/null 2>&1 && [[ -n "$WIFI_IFACE" ]]; then
+                val=$(iwconfig "$WIFI_IFACE" 2>/dev/null | grep -oE 'Signal level=-?[0-9]+' | grep -oE -- '-?[0-9]+')
+            fi
+            if [[ -z "$val" ]] && command -v nmcli >/dev/null 2>&1; then
+                pct=$(nmcli -t -f active,signal dev wifi 2>/dev/null | awk -F: '$1=="yes"{print $2; exit}')
+                [[ -n "$pct" ]] && val=$(( pct / 2 - 100 ))
+            fi
+            ;;
+        wsl|windows)
+            pct=$("$NETSH_BIN" wlan show interfaces 2>/dev/null | grep -m1 -E 'Signal' | grep -oE '[0-9]+%' | tr -d '%')
+            [[ -n "$pct" ]] && val=$(( pct / 2 - 100 ))
+            ;;
+    esac
+
+    printf '%s' "$val"
+}
+
 # Computes "min max mean median stddev" from the readings array.
 # Sorts externally with `sort -n` since the default macOS /usr/bin/awk
 # has no built-in sort function (that's a gawk-only extension).
@@ -136,6 +262,7 @@ clear
 
 # --- Static content (plain text, used both to print and to size the separators) ---
 TITLE="Wi-Fi RSSI Monitor (Press Ctrl+C to stop)"
+PLATFORM_LINE="Platform: $PLATFORM_LABEL"
 KEY_HEADING="Key (signal quality by RSSI):"
 DESC_LINES=(
     "RSSI (Received Signal Strength Indicator) measures how strong the Wi-Fi"
@@ -147,6 +274,12 @@ DESC_LINES=(
     "To improve it: move closer, reduce obstructions, switch channels/bands,"
     "or add an access point/mesh node."
 )
+if [[ "$SOURCE_IS_APPROX" -eq 1 ]]; then
+    DESC_LINES+=(
+        "Note: this platform only exposes signal quality as a percentage, so"
+        "values marked with '~' are an approximate dBm, not a direct radio reading."
+    )
+fi
 CAT_NAME=("Excellent" "Good" "Fair" "Poor" "Bad")
 CAT_RANGE=(">= -50 dBm" "-50 to -60 dBm" "-60 to -67 dBm" "-67 to -75 dBm" "<  -75 dBm")
 CAT_DESC=("as strong as it gets" "strong, reliable" "usable, may see slowdowns" "noticeable drops" "barely usable")
@@ -158,14 +291,14 @@ for i in "${!CAT_NAME[@]}"; do
     KEY_LINES+=("$line")
 done
 
-# Worst-case renderings of the live dashboard lines below (3-digit dBm, decimals),
-# so the separators are wide enough even before real readings come in.
-SAMPLE_CURRENT_LINE="Current RSSI: -100 dBm (Excellent)"
+# Worst-case renderings of the live dashboard lines below (3-digit dBm, decimals,
+# approx marker), so the separators are wide enough even before real readings come in.
+SAMPLE_CURRENT_LINE="Current RSSI: ~-100 dBm (Excellent, approx.)"
 SAMPLE_STATS_LINE="Min: -100 dBm  Max: -100 dBm  Mean: -100.0 dBm  Median: -100.0 dBm  StdDev: 100.0 dBm"
 
 # Size the separator lines to the widest line of actual content, rather than a fixed width.
 WIDTH=${#TITLE}
-for line in "${DESC_LINES[@]}" "$KEY_HEADING" "${KEY_LINES[@]}" "$SAMPLE_CURRENT_LINE" "$SAMPLE_STATS_LINE"; do
+for line in "$PLATFORM_LINE" "${DESC_LINES[@]}" "$KEY_HEADING" "${KEY_LINES[@]}" "$SAMPLE_CURRENT_LINE" "$SAMPLE_STATS_LINE"; do
     (( ${#line} > WIDTH )) && WIDTH=${#line}
 done
 SEP_EQ=$(printf '=%.0s' $(seq 1 "$WIDTH"))
@@ -179,6 +312,7 @@ print_static_line() {
 }
 
 print_static_line "$TITLE"
+print_static_line "$PLATFORM_LINE"
 print_static_line "$SEP_EQ"
 for line in "${DESC_LINES[@]}"; do
     print_static_line "$line"
@@ -193,8 +327,8 @@ print_static_line "$SEP_EQ"
 DASHBOARD_ROW=$STATIC_LINE_COUNT  # live region starts right after the static header
 
 while true; do
-    rssi_line=$(wdutil info | grep -m1 -E 'RSSI')
-    rssi=$(printf '%s' "$rssi_line" | grep -oE -- '-?[0-9]+' | head -1)
+    rssi=$(get_rssi)
+    approx=$SOURCE_IS_APPROX
 
     if [[ -n "$rssi" ]]; then
         readings+=("$rssi")
@@ -207,7 +341,11 @@ while true; do
     if [[ -n "$rssi" ]]; then
         color=$(color_for_rssi "$rssi")
         rating=$(rating_for_rssi "$rssi")
-        printf "Current RSSI: ${color}${BOLD}%d dBm (%s)${RESET}\n" "$rssi" "$rating"
+        if [[ "$approx" -eq 1 ]]; then
+            printf "Current RSSI: ${color}${BOLD}~%d dBm (%s, approx.)${RESET}\n" "$rssi" "$rating"
+        else
+            printf "Current RSSI: ${color}${BOLD}%d dBm (%s)${RESET}\n" "$rssi" "$rating"
+        fi
     else
         printf "Current RSSI: n/a (waiting for data...)\n"
     fi
