@@ -5,28 +5,28 @@ A collection of scripts and tools designed for network administration, performan
 ## Repository Contents
 
 ### Network Discovery & Auditing
-| Script | OS | Language | Description |
-|--------|----|----------|-------------|
-| **[network_scanner.py](#network-inventory-scanner)** | Linux/macOS | Python | Subnet scanner with ARP & Nmap integration. |
-| **[proxmox_net_check.sh](#proxmox-lxc-network-auditor)** | Proxmox | Bash | Rapidly audit network interfaces for LXC containers. |
+| Script                                                     | OS                  | Language   | Description                                                      |
+|------------------------------------------------------------|---------------------|------------|------------------------------------------------------------------|
+| **[network_scanner.py](#network-inventory-scanner)**       | Linux/macOS         | Python     | Subnet scanner with ARP & Nmap integration.                      |
+| **[proxmox_net_check.sh](#proxmox-lxc-network-auditor)**   | Proxmox             | Bash       | Rapidly audit network interfaces for LXC containers.             |
 
 ### Performance & Connectivity Monitoring
-| Script | OS | Language | Description |
-|--------|----|----------|-------------|
-| **[check_latency.py](#high-precision-latency-tester)** | Linux/macOS | Python | Detailed latency and packet loss analysis tool. |
-| **[check_latency_win.ps1](#windows-latency-tester)** | Windows | PowerShell | Windows-native latency monitor with reports. |
-| **[check_wifi.sh](#wi-fi-signal-monitor)** | macOS/Linux/Windows | Bash | Live RSSI dashboard with running signal-quality stats. |
-| **[monitor_smb.sh](#macos-smb--wi-fi-monitor)** | macOS | Bash | Side-by-side monitoring of SMB and Wi-Fi quality. |
+| Script                                                     | OS                  | Language   | Description                                                      |
+|------------------------------------------------------------|---------------------|------------|------------------------------------------------------------------|
+| **[check_latency.py](#high-precision-latency-tester)**     | Linux/macOS         | Python     | Detailed latency and packet loss analysis tool.                  |
+| **[check_latency_win.ps1](#windows-latency-tester)**       | Windows             | PowerShell | Windows-native latency monitor with reports.                     |
+| **[check_wifi.sh](#wi-fi-signal-monitor)**                 | macOS/Linux/Windows | Bash       | Live RSSI dashboard with running signal-quality stats.           |
+| **[monitor_smb.sh](#macos-smb--wi-fi-monitor)**            | macOS               | Bash       | Side-by-side monitoring of SMB and Wi-Fi quality.                |
 
 ### Infrastructure Configuration
-| Script | OS | Language | Description |
-|--------|----|----------|-------------|
-| **[pihole_importer.py](#pi-hole-v6-reservation-importer)** | Pi-hole | Python | Bulk importer for static DHCP/DNS into Pi-hole v6. |
+| Script                                                     | OS                  | Language   | Description                                                      |
+|------------------------------------------------------------|---------------------|------------|------------------------------------------------------------------|
+| **[pihole_importer.py](#pi-hole-v6-reservation-importer)** | Pi-hole             | Python     | Bulk importer for static DHCP/DNS into Pi-hole v6.               |
 
 ### Service Alerting & Monitoring
-| Script | OS | Language | Description |
-|--------|----|----------|-------------|
-| **[tvh_kuma_monitor.sh](#tvheadend--uptime-kuma-monitor)** | Linux (systemd) | Bash | Watches Tvheadend logs and pushes up/down status to Uptime Kuma. |
+| Script                                                     | OS                  | Language   | Description                                                      |
+|------------------------------------------------------------|---------------------|------------|------------------------------------------------------------------|
+| **[tvh_kuma_monitor.sh](#tvheadend--uptime-kuma-monitor)** | Linux (systemd)     | Bash       | Watches Tvheadend logs and pushes up/down status to Uptime Kuma. |
 
 ---
 

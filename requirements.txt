@@ -2,3 +2,4 @@ python-nmap
 scapy
 rich
 toml
+pytest
