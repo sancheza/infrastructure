@@ -6,6 +6,7 @@
 # 1. Manual Environment Load
 if [ -f "/usr/local/bin/.env" ]; then
     set -a
+    # shellcheck disable=SC1091  # intentionally untracked, host-specific secrets file
     source /usr/local/bin/.env
     set +a
 fi
