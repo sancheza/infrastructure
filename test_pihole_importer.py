@@ -114,6 +114,52 @@ def test_idempotent_rerun_does_not_duplicate(pihole_toml):
     assert len(data["dns"]["hosts"]) == 1
 
 
+# ---------- UI-added DNS record preservation (the reported bug) ----------
+
+def test_ui_added_dns_record_survives_import(tmp_path, monkeypatch):
+    """
+    A DNS record added via Settings > Local DNS Records is written by
+    Pi-hole as a two-field "IP HOSTNAME" entry (per Pi-hole's dns.hosts
+    format docs), not the three-field "IP FQDN HOSTNAME" form this script
+    writes for its own entries. Running the importer must not drop it.
+    """
+    toml_path = tmp_path / "pihole.toml"
+    _write_toml(
+        toml_path,
+        dhcp_hosts=["AA:BB:CC:DD:EE:01,192.168.1.50,myhost"],
+        dns_hosts=[
+            "192.168.1.50 myhost.home.lan myhost",
+            "192.168.1.99 manual.home.lan",  # added by hand via the UI
+        ],
+    )
+    monkeypatch.setattr(pi, "PIHOLE_TOML_PATH", str(toml_path))
+    _stub_subprocess(monkeypatch)
+
+    # Re-import the same CSV-derived entries; unrelated to the manual record.
+    pi.update_pihole_toml(
+        ["192.168.1.50 myhost.home.lan myhost"],
+        ["AA:BB:CC:DD:EE:01,192.168.1.50,myhost"],
+    )
+
+    data = toml.load(str(toml_path))
+    dns_ips = {pi.parse_dns_entry(e)[0] for e in data["dns"]["hosts"]}
+    assert "192.168.1.99" in dns_ips
+
+
+def test_unparseable_dns_entry_is_logged(capsys):
+    pi._WARNED_UNPARSEABLE.clear()
+    ip, fqdn, hostname = pi.parse_dns_entry("nofieldshere")
+    assert (ip, fqdn, hostname) == (None, None, None)
+    assert "Skipping unparseable dns.hosts entry" in capsys.readouterr().err
+
+
+def test_unparseable_dhcp_entry_is_logged(capsys):
+    pi._WARNED_UNPARSEABLE.clear()
+    mac, ip, hostname = pi.parse_dhcp_entry("AA:BB:CC:DD:EE:FF,192.168.1.50")
+    assert (mac, ip, hostname) == (None, None, None)
+    assert "Skipping unparseable dhcp.hosts entry" in capsys.readouterr().err
+
+
 # ---------- Integrity validation ----------
 
 def test_validate_rejects_duplicate_mac():

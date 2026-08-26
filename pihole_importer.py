@@ -8,6 +8,11 @@ Source format (required):
 MAC,IP,Hostname
 
 Strict validation is enforced. Invalid input aborts the run.
+
+Existing DNS and DHCP entries in pihole.toml that aren't present in the
+reservation file are left untouched, including DNS records added through
+the Pi-hole web UI (Settings > Local DNS Records), unless they conflict
+with an entry from the reservation file.
 """
 
 import argparse
@@ -34,7 +39,12 @@ except ImportError:
 PIHOLE_TOML_PATH = "/etc/pihole/pihole.toml"
 # define your local DNS domain below
 DOMAIN = "home.lan"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
+
+# Entries already warned about this run, so a raw TOML line parsed more than
+# once internally (e.g. once while building a lookup map, again inside
+# get_pihole_entries_as_set()) doesn't print the same warning twice.
+_WARNED_UNPARSEABLE = set()
 
 MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 # Regex for simple hostname (alphanumeric and hyphens)
@@ -205,17 +215,50 @@ def parse_reservations(input_file_path):
 def parse_dns_entry(entry_str):
     """
     Parse a DNS entry string.
-    
+
     Args:
-        entry_str (str): DNS entry string in format "IP FQDN HOSTNAME"
-        
+        entry_str (str): DNS entry string in Pi-hole's hosts-file form:
+            "IP HOSTNAME [HOSTNAME ...]". Entries created by this script use
+            three fields (IP, FQDN, short hostname); entries added through
+            the Pi-hole web UI ("Settings > Local DNS Records") have only
+            two fields (IP, single hostname).
+
     Returns:
-        tuple: (ip, fqdn, hostname) or (None, None, None) if parsing fails
+        tuple: (ip, fqdn, hostname) or (None, None, None) if parsing fails.
+            For a two-field entry, fqdn and hostname are the same value.
+            hostname is always the last field, normalized to lowercase.
     """
     parts = entry_str.split()
-    if len(parts) >= 3:
-        return parts[0], parts[1], parts[2].lower()  # Normalize hostname to lowercase
+    if len(parts) >= 2:
+        return parts[0], parts[1], parts[-1].lower()  # Normalize hostname to lowercase
+    key = ("dns", entry_str)
+    if key not in _WARNED_UNPARSEABLE:
+        _WARNED_UNPARSEABLE.add(key)
+        print(
+            f"⚠️  Skipping unparseable dns.hosts entry: {entry_str!r} "
+            f'(expected "IP HOSTNAME [HOSTNAME ...]")',
+            file=sys.stderr,
+        )
     return None, None, None
+
+
+def normalize_dns_hosts_entry(entry_str):
+    """
+    Lowercase the hostname fields of a dns.hosts entry while preserving the
+    IP and however many hostname aliases it has.
+
+    Args:
+        entry_str (str): DNS entry string in Pi-hole's hosts-file form
+            ("IP HOSTNAME [HOSTNAME ...]")
+
+    Returns:
+        str: The entry with all hostname fields lowercased, or the original
+            string unchanged if it doesn't have at least an IP and a hostname.
+    """
+    parts = entry_str.split()
+    if len(parts) < 2:
+        return entry_str
+    return parts[0] + " " + " ".join(p.lower() for p in parts[1:])
 
 
 def parse_dhcp_entry(entry_str):
@@ -235,6 +278,16 @@ def parse_dhcp_entry(entry_str):
     parts = entry_str.split(",")
     if len(parts) >= 3:
         return parts[0], parts[1], parts[2].lower()  # Preserve MAC case, normalize hostname to lowercase
+    key = ("dhcp", entry_str)
+    if key not in _WARNED_UNPARSEABLE:
+        _WARNED_UNPARSEABLE.add(key)
+        print(
+            f"⚠️  Skipping unparseable dhcp.hosts entry: {entry_str!r} "
+            f'(expected "MAC,IP,HOSTNAME"; Pi-hole also allows leases with no '
+            f"hostname or with extra fields like a lease time, which this "
+            f"script does not support)",
+            file=sys.stderr,
+        )
     return None, None, None
 
 
@@ -715,7 +768,15 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
         5. Creates backup
         6. Writes updated configuration
         7. Restarts Pi-hole FTL service
-        
+
+    Existing dns.hosts / dhcp.hosts entries not present in dns_hosts /
+    dhcp_hosts are preserved as-is unless they conflict with one of the
+    new entries (same IP, MAC, or hostname). This includes DNS records
+    added through the Pi-hole web UI, which are two-field entries
+    ("IP HOSTNAME") rather than this script's three-field
+    ("IP FQDN HOSTNAME") format. Any entry that can't be parsed at all is
+    skipped with a warning rather than silently dropped.
+
     Raises:
         SystemExit: If there are errors reading/writing TOML or restarting service
     """
@@ -965,13 +1026,12 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
     
     # Start with all existing DNS entries that don't conflict
     for ip, entry in existing_dns_map.items():
-        # Normalize hostname to lowercase in the entry
+        # Normalize hostname(s) to lowercase, preserving field count (a
+        # UI-added record has only "IP HOSTNAME"; this script's own records
+        # have "IP FQDN HOSTNAME")
         parts = entry.split()
-        if len(parts) >= 3:
-            original_ip, original_fqdn, original_hostname = parts[0], parts[1], parts[2]
-            # Reconstruct with normalized hostname
-            normalized_entry = f"{original_ip} {original_fqdn} {original_hostname.lower()}"
-            final_dns_entries_dict[original_ip] = normalized_entry
+        if len(parts) >= 2:
+            final_dns_entries_dict[parts[0]] = normalize_dns_hosts_entry(entry)
     
     # Add new DNS entries from non-conflicting CSV entries
     for entry in conflicts['only_in_new']:
@@ -987,7 +1047,7 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
     # Preserve existing DNS-only entries (entries that were in original TOML but not in DHCP)
     original_dns_entries = data["dns"]["hosts"]
     for original_entry in original_dns_entries:
-        original_ip, original_fqdn, original_hostname = parse_dns_entry(original_entry)
+        original_ip, _, _ = parse_dns_entry(original_entry)
         if original_ip:
             # Check if this is a DNS-only entry (no corresponding DHCP entry)
             dns_only = True
@@ -1008,9 +1068,7 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
                         break
                 
                 if not conflict_found:
-                    # Normalize hostname to lowercase
-                    normalized_entry = f"{original_ip} {original_fqdn} {original_hostname.lower()}"
-                    final_dns_entries_dict[original_ip] = normalized_entry
+                    final_dns_entries_dict[original_ip] = normalize_dns_hosts_entry(original_entry)
     
     data["dns"]["hosts"] = list(final_dns_entries_dict.values())
     data["dhcp"]["hosts"] = list(existing_dhcp_map.values())
@@ -1083,6 +1141,10 @@ def main():
             "  • Validates MAC addresses, IP addresses, and hostnames\n"
             "  • Checks for existing entries in pihole.toml\n"
             "  • Detects conflicts (same IP, different details) and prompts user\n"
+            "  • Preserves existing DNS/DHCP entries not in the input file,\n"
+            "    including DNS records added via the Pi-hole web UI\n"
+            "  • Warns and skips (instead of silently dropping) any\n"
+            "    dns.hosts/dhcp.hosts entry it can't parse\n"
             "  • Creates automatic backups before making changes\n"
             "  • Idempotent operation (safe to run multiple times)\n"
             "  • Automatically restarts Pi-hole FTL service\n"
