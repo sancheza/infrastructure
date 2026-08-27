@@ -12,7 +12,10 @@ Strict validation is enforced. Invalid input aborts the run.
 Existing DNS and DHCP entries in pihole.toml that aren't present in the
 reservation file are left untouched, including DNS records added through
 the Pi-hole web UI (Settings > Local DNS Records), unless they conflict
-with an entry from the reservation file.
+with an entry from the reservation file. A single IP may have multiple
+dns.hosts entries (e.g. several hostname aliases pointing at a reverse
+proxy); all of them are preserved, not just one per IP. Any entry a run
+removes is logged to stderr.
 """
 
 import argparse
@@ -39,7 +42,7 @@ except ImportError:
 PIHOLE_TOML_PATH = "/etc/pihole/pihole.toml"
 # define your local DNS domain below
 DOMAIN = "home.lan"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 # Entries already warned about this run, so a raw TOML line parsed more than
 # once internally (e.g. once while building a lookup map, again inside
@@ -291,6 +294,35 @@ def parse_dhcp_entry(entry_str):
     return None, None, None
 
 
+def dns_entry_identity(entry_str):
+    """Identity of a dns.hosts entry for drop/diff comparisons: (ip, hostname)."""
+    ip, _, hostname = parse_dns_entry(entry_str)
+    return (ip, hostname)
+
+
+def dhcp_entry_identity(entry_str):
+    """Identity of a dhcp.hosts entry for drop/diff comparisons: (mac, ip, hostname)."""
+    mac, ip, hostname = parse_dhcp_entry(entry_str)
+    return (mac.upper() if mac else mac, ip, hostname)
+
+
+def warn_dropped_entries(kind, identity_fn, before, after):
+    """
+    Print a warning for every entry present in `before` but not `after`.
+
+    Entries are compared by identity_fn rather than raw string equality, so
+    a harmless normalization (e.g. lowercasing) isn't mistaken for a drop.
+    Intended to be called right before a rewrite is committed, so any
+    dns.hosts/dhcp.hosts entry the run is about to remove -- whether from
+    an approved conflict resolution or an unexpected cause -- is visible in
+    the log instead of silently disappearing.
+    """
+    after_identities = {identity_fn(e) for e in after}
+    for entry in before:
+        if identity_fn(entry) not in after_identities:
+            print(f"🗑️  {kind} entry removed by this run: {entry!r}", file=sys.stderr)
+
+
 # ---------- TOML handling ----------
 
 def backup_pihole_toml():
@@ -442,29 +474,25 @@ def get_pihole_entries_as_set(data):
         The parse_dhcp_entry function preserves MAC case, parse_dns_entry normalizes hostnames
     """
     entries = set()
-    
+    dhcp_ips = set()
+
     # Parse DHCP entries (these have MAC addresses)
     for entry in data.get("dhcp", {}).get("hosts", []):
         mac, ip, hostname = parse_dhcp_entry(entry)
         if mac and ip and hostname:
             # Normalize MAC to uppercase for consistent comparison
             entries.add((mac.upper(), ip, hostname.lower()))
-    
-    # Parse DNS entries that don't have DHCP counterparts
-    dns_map = {}
+            dhcp_ips.add(ip)
+
+    # Add DNS entries that don't have a DHCP counterpart for their IP. Each
+    # dns.hosts line is added independently rather than collapsed into a
+    # dict keyed by IP, since Pi-hole allows multiple hostname aliases to
+    # share one IP (e.g. several names pointing at a reverse proxy).
     for entry in data.get("dns", {}).get("hosts", []):
         ip, fqdn, hostname = parse_dns_entry(entry)
-        if ip and hostname:
-            # parse_dns_entry already normalizes hostname to lowercase
-            dns_map[ip] = hostname
-    
-    # Add DNS-only entries (without MAC)
-    for ip, hostname in dns_map.items():
-        # Check if this IP already exists in DHCP entries
-        ip_in_dhcp = any(entry[1] == ip for entry in entries)
-        if not ip_in_dhcp:
+        if ip and hostname and ip not in dhcp_ips:
             entries.add(("", ip, hostname))  # hostname already normalized
-    
+
     return entries
 
 
@@ -657,28 +685,30 @@ def export_pihole_entries():
     dns_entries = data.get("dns", {}).get("hosts", [])
     dhcp_entries = data.get("dhcp", {}).get("hosts", [])
 
-    # Create a mapping from IP to hostname for DNS entries
-    dns_map = {}
+    # Every dns.hosts entry, kept as a list rather than a dict keyed by IP:
+    # Pi-hole allows multiple hostname aliases to share one IP, and a dict
+    # keyed by IP would silently export only the last one.
+    dns_list = []
     for entry in dns_entries:
         ip, fqdn, hostname = parse_dns_entry(entry)
         if ip and hostname:
-            dns_map[ip] = hostname
+            dns_list.append((ip, hostname))
 
     # Build export entries from DHCP (which has MAC addresses)
     export_entries = []
+    dhcp_ips = set()
     for entry in dhcp_entries:
         mac, ip, hostname = parse_dhcp_entry(entry)
         if mac and ip:
-            # Use hostname from DHCP entry, fall back to DNS hostname if available
-            final_hostname = hostname or dns_map.get(ip, "")
+            dhcp_ips.add(ip)
+            # Use hostname from DHCP entry, fall back to a matching DNS hostname
+            final_hostname = hostname or next((h for i, h in dns_list if i == ip), "")
             if final_hostname:
                 export_entries.append(f"{mac},{ip},{final_hostname}")
 
-    # Add DNS entries that don't have corresponding DHCP entries
-    for ip, hostname in dns_map.items():
-        # Check if this IP already exists in our export (from DHCP)
-        ip_exists = any(entry.startswith(f",{ip},") or entry.split(",")[1] == ip for entry in export_entries)
-        if not ip_exists:
+    # Add DNS entries/aliases that don't have a corresponding DHCP entry
+    for ip, hostname in dns_list:
+        if ip not in dhcp_ips:
             # For DNS-only entries, we don't have a MAC, so use empty MAC field
             export_entries.append(f",{ip},{hostname}")
 
@@ -736,14 +766,19 @@ def validate_toml_integrity(data):
         seen_macs.add(mac.upper())
         seen_dhcp_ips.add(ip)
 
-    seen_dns_ips = set()
+    # A single IP may legitimately appear on multiple dns.hosts lines (e.g.
+    # several hostname aliases pointing at one reverse proxy), so only an
+    # exact (ip, hostname) repeat -- the same line in substance twice -- is
+    # rejected here.
+    seen_dns_entries = set()
     for entry in dns_hosts:
         ip, fqdn, hostname = parse_dns_entry(entry)
         if not ip or not fqdn or not hostname:
             raise ValueError(f"Malformed dns.hosts entry: {entry!r}")
-        if ip in seen_dns_ips:
-            raise ValueError(f"Duplicate IP address in dns.hosts: {ip}")
-        seen_dns_ips.add(ip)
+        key = (ip, hostname)
+        if key in seen_dns_entries:
+            raise ValueError(f"Duplicate dns.hosts entry for {ip} {hostname}")
+        seen_dns_entries.add(key)
 
     # Round-trip through the TOML serializer to make sure the result actually parses.
     try:
@@ -774,8 +809,12 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
     new entries (same IP, MAC, or hostname). This includes DNS records
     added through the Pi-hole web UI, which are two-field entries
     ("IP HOSTNAME") rather than this script's three-field
-    ("IP FQDN HOSTNAME") format. Any entry that can't be parsed at all is
-    skipped with a warning rather than silently dropped.
+    ("IP FQDN HOSTNAME") format, and DNS entries that share an IP with
+    another entry (e.g. multiple hostname aliases pointing at one reverse
+    proxy) -- each is tracked and preserved individually rather than
+    collapsed down to one entry per IP. Any entry that can't be parsed at
+    all is skipped with a warning rather than silently dropped, and any
+    entry actually removed by the run is logged to stderr.
 
     Raises:
         SystemExit: If there are errors reading/writing TOML or restarting service
@@ -791,16 +830,27 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
     data.setdefault("dns", {})
     data["dns"].setdefault("hosts", [])
 
-    # Map IP -> full_entry_string for existing DNS entries
+    # Snapshot of every existing dns.hosts line, kept as a list rather than
+    # a dict keyed by IP: Pi-hole allows multiple independent dns.hosts
+    # lines to share one IP (e.g. several hostname aliases pointing at a
+    # reverse proxy), and keying by IP would silently drop every entry but
+    # the last for any IP that has more than one.
+    original_dns_hosts = list(data["dns"]["hosts"])
+    existing_dns_entries = list(original_dns_hosts)
+
+    # IP -> one existing entry for that IP, used only to show the "current"
+    # DNS record in the conflict prompts below; not used to decide what
+    # survives the rewrite.
     existing_dns_map = {}
-    for entry in data["dns"]["hosts"]:
+    for entry in existing_dns_entries:
         ip, _, _ = parse_dns_entry(entry)
-        if ip:
+        if ip and ip not in existing_dns_map:
             existing_dns_map[ip] = entry
 
     # --- DHCP Processing ---
     data.setdefault("dhcp", {})
     data["dhcp"].setdefault("hosts", [])
+    original_dhcp_hosts = list(data["dhcp"]["hosts"])
 
     # Map MAC -> full_entry_string for existing DHCP entries (MAC is the true key for DHCP)
     # Keys are normalized to uppercase so lookups/removals agree with the CSV-derived
@@ -1000,78 +1050,58 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
         entry_mac, _, _ = parse_dhcp_entry(entry)
         existing_dhcp_map[entry_mac] = entry
     
-    # 1.5. Remove old entries that were overwritten by conflicts
-    # When we resolve conflicts, we need to remove the old entries from existing_dns_map
-    # so they don't get added back in the final construction
+    # 1.5. Drop the specific existing DNS entries superseded by a conflict
+    # resolution the user approved above. Matched by (ip, hostname) rather
+    # than ip alone, so other dns.hosts lines that happen to share the ip
+    # (e.g. manually-added aliases unrelated to this reservation) are left
+    # untouched instead of being swept away along with the stale entry.
     for conflict in all_conflicts:
         if len(conflict) == 2:
-            new_entry, existing_entry = conflict
-            old_ip = existing_entry[1]  # IP from existing entry
+            _, existing_entry = conflict
+            old_ip, old_hostname = existing_entry[1], existing_entry[2]
         else:
             _, _, old_entry, _, _ = conflict
-            old_ip = parse_dhcp_entry(old_entry)[1]  # IP from old entry
-        
-        # Remove the old entry from existing_dns_map if it exists
-        if old_ip in existing_dns_map:
-            del existing_dns_map[old_ip]
+            _, old_ip, old_hostname = parse_dhcp_entry(old_entry)
 
-    # 2. Convert back to lists with preservation of DNS-only entries
-    # We want to preserve:
-    # - All existing DNS entries that don't conflict with new entries
-    # - All new DNS entries from the CSV (including conflict resolutions)
-    # - All existing DNS-only entries (entries without corresponding DHCP)
-    
-    # Use a dictionary with IP as key to ensure 1:1 relationship and prevent case-sensitive duplicates
-    final_dns_entries_dict = {}
-    
-    # Start with all existing DNS entries that don't conflict
-    for ip, entry in existing_dns_map.items():
-        # Normalize hostname(s) to lowercase, preserving field count (a
-        # UI-added record has only "IP HOSTNAME"; this script's own records
-        # have "IP FQDN HOSTNAME")
-        parts = entry.split()
-        if len(parts) >= 2:
-            final_dns_entries_dict[parts[0]] = normalize_dns_hosts_entry(entry)
-    
+        existing_dns_entries = [
+            e for e in existing_dns_entries
+            if parse_dns_entry(e)[0] != old_ip or parse_dns_entry(e)[2] != old_hostname
+        ]
+
+    # 2. Build the final dns.hosts list, keyed by (ip, hostname) rather than
+    # ip alone so multiple aliases sharing one IP all survive.
+    #
+    # Start with every remaining existing entry (the stale ones superseded
+    # by an approved conflict resolution were already removed in step 1.5
+    # above), then layer new/changed entries from the CSV on top.
+    final_dns_by_identity = {}
+    for entry in existing_dns_entries:
+        normalized = normalize_dns_hosts_entry(entry)
+        ip, _, hostname = parse_dns_entry(normalized)
+        if ip:
+            final_dns_by_identity[(ip, hostname)] = normalized
+
     # Add new DNS entries from non-conflicting CSV entries
     for entry in conflicts['only_in_new']:
         mac, ip, hostname = entry
         if mac:  # Only add entries with MAC addresses (DHCP entries)
-            dns_entry = f"{ip} {hostname.lower()}.{DOMAIN} {hostname.lower()}"
-            final_dns_entries_dict[ip] = dns_entry  # This will overwrite any existing entry for this IP
-    
-    # Add DNS entries from conflict resolutions (these should overwrite any existing entries)
+            hostname = hostname.lower()
+            final_dns_by_identity[(ip, hostname)] = f"{ip} {hostname}.{DOMAIN} {hostname}"
+
+    # Add DNS entries from conflict resolutions
     for ip, dns_entry in dns_to_add.items():
-        final_dns_entries_dict[ip] = dns_entry
-    
-    # Preserve existing DNS-only entries (entries that were in original TOML but not in DHCP)
-    original_dns_entries = data["dns"]["hosts"]
-    for original_entry in original_dns_entries:
-        original_ip, _, _ = parse_dns_entry(original_entry)
-        if original_ip:
-            # Check if this is a DNS-only entry (no corresponding DHCP entry)
-            dns_only = True
-            for dhcp_entry in data["dhcp"]["hosts"]:
-                dhcp_mac, dhcp_ip, dhcp_hostname = parse_dhcp_entry(dhcp_entry)
-                if dhcp_ip == original_ip:
-                    dns_only = False
-                    break
-            
-            # If it's DNS-only and not already in our final dict, preserve it
-            if dns_only and original_ip not in final_dns_entries_dict:
-                # But only if it doesn't conflict with new entries
-                conflict_found = False
-                for new_entry in conflicts['only_in_new']:
-                    new_mac, new_ip, new_hostname = new_entry
-                    if new_ip == original_ip:
-                        conflict_found = True
-                        break
-                
-                if not conflict_found:
-                    final_dns_entries_dict[original_ip] = normalize_dns_hosts_entry(original_entry)
-    
-    data["dns"]["hosts"] = list(final_dns_entries_dict.values())
+        _, _, hostname = parse_dns_entry(dns_entry)
+        final_dns_by_identity[(ip, hostname)] = dns_entry
+
+    data["dns"]["hosts"] = list(final_dns_by_identity.values())
     data["dhcp"]["hosts"] = list(existing_dhcp_map.values())
+
+    # Warn about any entry that existed before this run but won't be
+    # written back, whether dropped intentionally (an approved conflict
+    # resolution) or not, so a future mismatch is visible in the log
+    # instead of silently disappearing.
+    warn_dropped_entries("dns.hosts", dns_entry_identity, original_dns_hosts, data["dns"]["hosts"])
+    warn_dropped_entries("dhcp.hosts", dhcp_entry_identity, original_dhcp_hosts, data["dhcp"]["hosts"])
 
     try:
         validate_toml_integrity(data)
@@ -1142,9 +1172,11 @@ def main():
             "  • Checks for existing entries in pihole.toml\n"
             "  • Detects conflicts (same IP, different details) and prompts user\n"
             "  • Preserves existing DNS/DHCP entries not in the input file,\n"
-            "    including DNS records added via the Pi-hole web UI\n"
+            "    including DNS records added via the Pi-hole web UI and\n"
+            "    multiple hostname aliases sharing one IP\n"
             "  • Warns and skips (instead of silently dropping) any\n"
-            "    dns.hosts/dhcp.hosts entry it can't parse\n"
+            "    dns.hosts/dhcp.hosts entry it can't parse, and logs any\n"
+            "    entry a run actually removes\n"
             "  • Creates automatic backups before making changes\n"
             "  • Idempotent operation (safe to run multiple times)\n"
             "  • Automatically restarts Pi-hole FTL service\n"
