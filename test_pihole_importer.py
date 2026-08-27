@@ -1,6 +1,10 @@
 """
 Regression and integrity tests for pihole_importer.py.
 
+Covers: MAC-change DHCP replacement, UI-added DNS record preservation,
+multiple DNS aliases sharing one IP, conflict-resolution scoping,
+unparseable-entry warnings, and TOML integrity validation.
+
 Run with: pytest test_pihole_importer.py
 """
 
@@ -13,6 +17,8 @@ import toml
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pihole_importer as pi
+
+TESTS_FOR_VERSION = pi.VERSION
 
 
 class _FakeCompletedProcess:
@@ -160,6 +166,90 @@ def test_unparseable_dhcp_entry_is_logged(capsys):
     assert "Skipping unparseable dhcp.hosts entry" in capsys.readouterr().err
 
 
+# ---------- Multiple DNS aliases sharing one IP (the reported bug) ----------
+
+def test_multiple_dns_aliases_on_one_ip_all_survive(tmp_path, monkeypatch):
+    """
+    Pi-hole allows several independent dns.hosts lines to share one IP --
+    e.g. multiple hostnames pointing at a reverse proxy. The importer must
+    not collapse them down to a single entry per IP on rewrite.
+    """
+    toml_path = tmp_path / "pihole.toml"
+    _write_toml(
+        toml_path,
+        dhcp_hosts=["BC:24:11:15:0F:7F,192.168.0.16,caddy"],
+        dns_hosts=[
+            "192.168.0.16 caddy.home.lan caddy",  # the DHCP-driven record
+            "192.168.0.16 sonarr",  # manually-added alias
+            "192.168.0.16 radarr",  # another manually-added alias
+        ],
+    )
+    monkeypatch.setattr(pi, "PIHOLE_TOML_PATH", str(toml_path))
+    _stub_subprocess(monkeypatch)
+
+    # Re-import the same, unchanged CSV-derived caddy entry.
+    pi.update_pihole_toml(
+        ["192.168.0.16 caddy.home.lan caddy"],
+        ["BC:24:11:15:0F:7F,192.168.0.16,caddy"],
+    )
+
+    data = toml.load(str(toml_path))
+    hostnames = {pi.parse_dns_entry(e)[2] for e in data["dns"]["hosts"]}
+    assert hostnames == {"caddy", "sonarr", "radarr"}
+
+
+def test_conflict_resolution_only_replaces_matching_alias(tmp_path, monkeypatch):
+    """
+    When a reservation's hostname changes, only the stale entry for that
+    exact (ip, hostname) should be removed -- other aliases on the same IP
+    must survive.
+    """
+    toml_path = tmp_path / "pihole.toml"
+    _write_toml(
+        toml_path,
+        dhcp_hosts=["BC:24:11:15:0F:7F,192.168.0.16,caddy"],
+        dns_hosts=[
+            "192.168.0.16 caddy.home.lan caddy",
+            "192.168.0.16 sonarr",  # unrelated manual alias, must survive
+        ],
+    )
+    monkeypatch.setattr(pi, "PIHOLE_TOML_PATH", str(toml_path))
+    _stub_subprocess(monkeypatch)
+
+    # Rename the caddy host itself -- this is a hostname change for an
+    # existing MAC, which goes through the conflict-confirmation path.
+    pi.update_pihole_toml(
+        ["192.168.0.16 caddy-proxy.home.lan caddy-proxy"],
+        ["BC:24:11:15:0F:7F,192.168.0.16,caddy-proxy"],
+    )
+
+    data = toml.load(str(toml_path))
+    hostnames = {pi.parse_dns_entry(e)[2] for e in data["dns"]["hosts"]}
+    assert hostnames == {"caddy-proxy", "sonarr"}
+    assert "caddy" not in hostnames
+
+
+def test_validate_accepts_multiple_dns_aliases_on_one_ip():
+    data = {
+        "dhcp": {"hosts": []},
+        "dns": {"hosts": [
+            "192.168.1.50 myhost.home.lan myhost",
+            "192.168.1.50 otherhost",
+        ]},
+    }
+    pi.validate_toml_integrity(data)  # should not raise
+
+
+def test_warn_dropped_entries_logs_removed_dns_entry(capsys):
+    before = ["192.168.1.50 myhost.home.lan myhost", "192.168.1.60 stays.home.lan stays"]
+    after = ["192.168.1.60 stays.home.lan stays"]
+    pi.warn_dropped_entries("dns.hosts", pi.dns_entry_identity, before, after)
+    err = capsys.readouterr().err
+    assert "dns.hosts entry removed by this run" in err
+    assert "myhost" in err
+    assert "stays" not in err
+
+
 # ---------- Integrity validation ----------
 
 def test_validate_rejects_duplicate_mac():
@@ -186,15 +276,20 @@ def test_validate_rejects_duplicate_dhcp_ip():
         pi.validate_toml_integrity(data)
 
 
-def test_validate_rejects_duplicate_dns_ip():
+def test_validate_rejects_duplicate_dns_entry():
+    """
+    An exact (ip, hostname) repeat is rejected, but the same IP appearing
+    under two different hostnames is not -- Pi-hole allows multiple
+    aliases to share one IP (see test_validate_accepts_multiple_dns_aliases_on_one_ip).
+    """
     data = {
         "dhcp": {"hosts": []},
         "dns": {"hosts": [
             "192.168.1.50 myhost.home.lan myhost",
-            "192.168.1.50 otherhost.home.lan otherhost",
+            "192.168.1.50 myhost.home.lan myhost",
         ]},
     }
-    with pytest.raises(ValueError, match="Duplicate IP"):
+    with pytest.raises(ValueError, match="Duplicate dns.hosts entry"):
         pi.validate_toml_integrity(data)
 
 
@@ -204,3 +299,25 @@ def test_validate_accepts_clean_config():
         "dns": {"hosts": ["192.168.1.50 myhost.home.lan myhost"]},
     }
     pi.validate_toml_integrity(data)  # should not raise
+
+
+# ---------- Direct invocation (pytest never executes this) ----------
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description=(
+            __doc__.strip() + "\n\n"
+            "This file is a pytest module, not a standalone CLI -- running it\n"
+            "directly (as here) only prints this info and exits; it does not\n"
+            "execute the tests."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument(
+        "-v", "--version", action="version",
+        version=f"%(prog)s (tests for pihole_importer.py {TESTS_FOR_VERSION})",
+    )
+    parser.parse_args()
+    parser.print_help()
