@@ -1,0 +1,13 @@
+# systemd service for the macaddr reservation HTTP microservice
+[Unit]
+Description=Pi-hole macaddr.txt Reservation Service
+After=network.target pihole-FTL.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /root/scripts/macaddr_reservation_service.py
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target

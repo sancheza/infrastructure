@@ -13,6 +13,7 @@ A collection of scripts and tools designed for network administration, performan
 | Performance & Connectivity    | **[check_wifi.sh](#wi-fi-signal-monitor)**                 | macOS/Linux/Windows | Bash       | Live RSSI dashboard with running signal-quality stats.           |
 | Performance & Connectivity    | **[monitor_smb.sh](#macos-smb--wi-fi-monitor)**            | macOS               | Bash       | Side-by-side monitoring of SMB and Wi-Fi quality.                |
 | Infrastructure Configuration  | **[pihole_importer.py](#pi-hole-v6-reservation-importer)** | Pi-hole             | Python     | Bulk importer for static DHCP/DNS into Pi-hole v6.               |
+| Infrastructure Configuration  | **[macaddr_reservation_service.py](#macaddr-reservation-service)** | Pi-hole     | Python     | Authenticated HTTP service that adds host reservations.          |
 | Service Alerting & Monitoring | **[tvh_kuma_monitor.sh](#tvheadend--uptime-kuma-monitor)** | Linux (systemd)     | Bash       | Watches Tvheadend logs and pushes up/down status to Uptime Kuma. |
 
 ---
@@ -109,6 +110,42 @@ Why it's useful: hand-editing `pihole.toml` for dozens of static reservations is
   - Requires the `toml` Python package (`pip install toml` or `sudo apt install python3-toml`) and write access to `/etc/pihole/pihole.toml`, so it needs `sudo` on most systems.
   - Example: `sudo python3 pihole_importer.py ./reservations.txt`
 
+#### macaddr Reservation Service
+**Files:** `macaddr_reservation_service.py`, `macaddr-reservation-service.service`
+
+What it does: a companion microservice to `pihole_importer.py` that lets a trusted caller add a host reservation over HTTP instead of hand-editing `macaddr.txt`. `POST /reservations` with a MAC, a hostname, and a `host_type` (matched case-insensitively against one of the `# Label .START to .END` section headers in `macaddr.txt`); the service allocates the first free IP in that section's range, inserts `MAC,IP,HOSTNAME` immediately after the previous IP in numeric order, and runs `pihole_importer.py` against the updated file. Reservations are add-only — an existing MAC, IP, or hostname is never edited or removed, and a duplicate MAC or hostname is rejected with the IP it's already using. `GET /healthz` is an unauthenticated liveness check. Every write is preceded by a timestamped backup and an advisory file lock serializes concurrent requests. Built on the standard library only (`http.server`), with no third-party dependencies.
+
+Why it's useful: turns "reserve the next free IP for this new device" into one authenticated API call — from a provisioning script, an onboarding flow, or a one-off `curl` — without SSH access to the Pi-hole host or a risk of hand-editing `macaddr.txt` out of order.
+
+- **Auth:** every `/reservations` request needs `Authorization: Bearer <token>`. Generate one and lock it down:
+  ```bash
+  openssl rand -hex 32 > /root/scripts/macaddr_service_token
+  chmod 600 /root/scripts/macaddr_service_token
+  ```
+  Setting the `MACADDR_SERVICE_TOKEN` environment variable overrides the token file.
+- **Network trust:** the service only accepts connections from `--allowed-cidr` (default `192.168.0.0/24`); every other source is silently dropped at the TCP level. It must run as root (Pi-hole's DHCP/DNS reservations and the systemd restart both require it), so `--allowed-cidr` — narrowed further with a host firewall if needed — is the primary control keeping it off anything but the trusted management network.
+- **Usage:** `sudo python3 macaddr_reservation_service.py [--port PORT] [--allowed-cidr CIDR] [--reservations-file PATH] [--importer-path PATH] [-v]`
+  - `--reservations-file` — path to `macaddr.txt` (default: `/root/scripts/macaddr.txt`)
+  - `--importer-path` — path to `pihole_importer.py` (default: `/root/scripts/pihole_importer.py`)
+  - `--port` — TCP port to listen on (default: `8600`)
+  - `--allowed-cidr` — only accept connections from this network (default: `192.168.0.0/24`)
+  - Example request:
+    ```bash
+    curl -sS -X POST http://192.168.0.8:8600/reservations \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"mac": "AA:BB:CC:DD:EE:FF", "hostname": "newhost", "host_type": "Servers"}'
+    ```
+    Add `"dry_run": true` to preview the allocated IP without writing anything.
+- **Install as a service:**
+  ```bash
+  sudo cp macaddr_reservation_service.py macaddr-reservation-service.service pihole_importer.py /root/scripts/
+  sudo cp macaddr-reservation-service.service /etc/systemd/system/
+  sudo systemctl enable --now macaddr-reservation-service.service
+  ```
+  Check status/logs with `systemctl status macaddr-reservation-service` / `journalctl -u macaddr-reservation-service -f`.
+- **Full docs:** architecture, a step-by-step how-to, and troubleshooting — see [Documentation](#documentation) below.
+
 ### Service Alerting & Monitoring
 
 #### Tvheadend / Uptime Kuma Monitor
@@ -129,6 +166,17 @@ Why it's useful: Tvheadend can fail quietly (a tuner drops, a muxer crashes) wit
   4. Check status/logs with `systemctl status tvh-monitor` / `journalctl -u tvh-monitor -f`.
 
 ---
+
+## Documentation
+
+Full Sphinx docs for every tool in this repo are in `docs/`. Rebuild with:
+```bash
+cd docs && sphinx-build -b html . _build
+```
+Then open `docs/_build/index.html`. `macaddr_reservation_service.py` has a
+deeper, multi-page treatment (`docs/macaddr_reservation_service/`) since
+it's an HTTP service with its own security model; every other tool gets
+one reference page.
 
 ## Dependencies
 
