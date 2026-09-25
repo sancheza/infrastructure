@@ -3,3 +3,6 @@ scapy
 rich
 toml
 pytest
+
+# Sphinx docs - see docs/. Build with: cd docs && sphinx-build -b html . _build
+sphinx
