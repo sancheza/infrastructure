@@ -76,11 +76,25 @@ def test_find_existing_detects_mac_and_hostname(tmp_path):
     lines, _ = svc.read_reservations(str(path))
     sections = svc.parse_sections(lines)
 
-    assert svc.find_existing(sections, "AC:91:9B:63:4E:B7", "newname") == (
-        "mac", "192.168.0.1")
-    assert svc.find_existing(sections, "00:00:00:00:00:00", "proxmox") == (
-        "hostname", "192.168.0.6")
+    mac_kind, mac_ip, mac_section = svc.find_existing(
+        sections, "AC:91:9B:63:4E:B7", "newname")
+    assert (mac_kind, mac_ip, mac_section.label) == ("mac", "192.168.0.1", "Servers")
+
+    host_kind, host_ip, host_section = svc.find_existing(
+        sections, "00:00:00:00:00:00", "proxmox")
+    assert (host_kind, host_ip, host_section.label) == (
+        "hostname", "192.168.0.6", "Servers")
+
     assert svc.find_existing(sections, "00:00:00:00:00:00", "newname") is None
+
+
+def test_find_existing_detects_exact_repeat(tmp_path):
+    path = _write_sample(tmp_path / "macaddr.txt")
+    lines, _ = svc.read_reservations(str(path))
+    sections = svc.parse_sections(lines)
+
+    kind, ip, section = svc.find_existing(sections, "ac:91:9b:63:4e:b7", "FIOS")
+    assert (kind, ip, section.label) == ("exact", "192.168.0.1", "Servers")
 
 
 # ---------- IP allocation ----------
@@ -228,6 +242,23 @@ def test_process_reservation_duplicate_hostname_is_conflict(tmp_path, monkeypatc
     assert excinfo.value.extra["existing_ip"] == "192.168.0.6"
 
 
+def test_process_reservation_exact_repeat_is_idempotent(tmp_path, monkeypatch):
+    config = _config(tmp_path, monkeypatch)
+    with open(config.reservations_file, encoding="utf-8") as f:
+        before = f.read()
+
+    result = svc.process_reservation(
+        {"mac": "ac:91:9b:63:4e:b7", "hostname": "FIOS", "host_type": "servers"},
+        config, pihole_importer,
+    )
+
+    assert result["status"] == "exists"
+    assert result["ip"] == "192.168.0.1"
+    assert result["host_type"] == "Servers"
+    with open(config.reservations_file, encoding="utf-8") as f:
+        assert f.read() == before
+
+
 def test_process_reservation_unknown_host_type(tmp_path, monkeypatch):
     config = _config(tmp_path, monkeypatch)
     with pytest.raises(svc.ReservationError) as excinfo:
@@ -338,6 +369,17 @@ def test_end_to_end_http_roundtrip(tmp_path, monkeypatch):
         resp = conn.getresponse()
         payload = json.loads(resp.read())
         assert resp.status == 201
+        assert payload["ip"] == "192.168.0.3"
+
+        # Repeating the same request -> 200, idempotent, no new IP assigned.
+        conn.request("POST", "/reservations", body=body, headers={
+            "Authorization": "Bearer secret",
+            "Content-Type": "application/json",
+        })
+        resp = conn.getresponse()
+        payload = json.loads(resp.read())
+        assert resp.status == 200
+        assert payload["status"] == "exists"
         assert payload["ip"] == "192.168.0.3"
 
         conn.request("GET", "/healthz")

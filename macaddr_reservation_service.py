@@ -48,7 +48,7 @@ import traceback
 from datetime import datetime
 from http import HTTPStatus
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 DEFAULT_RESERVATIONS_FILE = "/root/scripts/macaddr.txt"
 DEFAULT_IMPORTER_PATH = "/root/scripts/pihole_importer.py"
@@ -263,15 +263,32 @@ def find_section(sections, host_type):
 
 
 def find_existing(sections, mac, hostname):
-    """Return ('mac'|'hostname', ip) if already reserved anywhere, else None."""
+    """Look up whether mac/hostname already appear in the reservations file.
+
+    Distinguishes a request that exactly repeats an existing entry (same
+    mac AND same hostname, on the same row) from one that collides with a
+    *different* entry (mac reused under another hostname, or vice versa),
+    so callers can treat the former as an idempotent repeat and the latter
+    as a genuine conflict.
+
+    Returns:
+        tuple[str, str, Section] | None: (kind, ip, section) where kind is
+        "exact" (same mac and hostname already reserved together), "mac"
+        (mac reserved under a different hostname), or "hostname" (hostname
+        reserved under a different mac). None if neither appears at all.
+    """
     mac_norm = mac.upper()
     hostname_norm = hostname.lower()
     for section in sections:
         for entry in section.entries:
-            if entry.mac.upper() == mac_norm:
-                return "mac", entry.ip
-            if entry.hostname.lower() == hostname_norm:
-                return "hostname", entry.ip
+            mac_match = entry.mac.upper() == mac_norm
+            hostname_match = entry.hostname.lower() == hostname_norm
+            if mac_match and hostname_match:
+                return "exact", entry.ip, section
+            if mac_match:
+                return "mac", entry.ip, section
+            if hostname_match:
+                return "hostname", entry.ip, section
     return None
 
 
@@ -393,16 +410,19 @@ def process_reservation(payload, config, importer_module):
 
     Returns:
         dict: On success, {"status", "mac", "hostname", "host_type", "ip",
-        ...}. "status" is "dry-run" (no file write, "importer": None) or
-        "created" (file written; "importer_ok" and "importer" carry the
+        ...}. "status" is "dry-run" (no file write, "importer": None),
+        "exists" (mac and hostname already reserved together -- an
+        idempotent repeat of a prior request, no file write) or "created"
+        (file written; "importer_ok" and "importer" carry the
         pihole_importer.py run's result).
 
     Raises:
         ReservationError: mac/hostname/host_type missing or fails
             validation (400); host_type doesn't match any section (404,
             with "valid_host_types"); the mac or hostname is already
-            reserved anywhere in the file (409, with "existing_ip"); or
-            the target section has no free IP left (503).
+            reserved under a *different* hostname or mac (409, with
+            "existing_ip"); or the target section has no free IP left
+            (503).
     """
     mac_raw = payload.get("mac")
     hostname_raw = payload.get("hostname")
@@ -439,7 +459,15 @@ def process_reservation(payload, config, importer_module):
 
         existing = find_existing(sections, mac, hostname)
         if existing is not None:
-            kind, ip = existing
+            kind, ip, existing_section = existing
+            if kind == "exact":
+                return {
+                    "status": "exists",
+                    "mac": mac,
+                    "hostname": hostname,
+                    "host_type": existing_section.label,
+                    "ip": ip,
+                }
             raise ReservationError(
                 HTTPStatus.CONFLICT,
                 f"{kind} already reserved",
@@ -561,7 +589,9 @@ def make_handler(config, importer_module):
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal error"})
                 return
 
-            status = HTTPStatus.OK if result["status"] == "dry-run" else HTTPStatus.CREATED
+            status = (
+                HTTPStatus.CREATED if result["status"] == "created" else HTTPStatus.OK
+            )
             self._send_json(status, result)
 
         def log_message(self, fmt, *fmt_args):

@@ -144,6 +144,13 @@ Expected output:
 
     {"status": "created", "mac": "AA:BB:CC:DD:EE:FF", "hostname": "newhost", "host_type": "Servers", "ip": "192.168.0.3", "reservations_file": "/root/scripts/macaddr.txt", "importer_ok": true, "importer": {"returncode": 0, "stdout": "...", "stderr": ""}}
 
+Submitting that exact same request again is safe -- the same MAC and
+hostname together are treated as a repeat of an existing reservation,
+not a new one, and return ``200 {"status": "exists", ..., "ip":
+"192.168.0.3"}`` with no file write. This makes the endpoint safe to
+call from idempotent automation (e.g. an OpenTofu ``local-exec``
+provisioner that may re-run on every ``apply``).
+
 ``host_type`` is matched case-insensitively against whatever
 ``# Label .START to .END`` sections currently exist in ``macaddr.txt`` --
 there's no fixed list in the service itself. An unknown ``host_type``
