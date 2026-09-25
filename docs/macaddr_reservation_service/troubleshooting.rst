@@ -72,9 +72,13 @@ expected ``# Label .START to .END`` format exactly -- for example
 **Symptom:** adding a reservation for a device fails with a 409.
 
 **Cause:** this is the add-only guarantee working as intended -- the MAC
-or hostname already has a reservation somewhere in ``macaddr.txt``
-(``existing_ip`` says where), and this service never edits or removes an
-existing line.
+or hostname already has a reservation *under a different hostname or
+MAC* somewhere in ``macaddr.txt`` (``existing_ip`` says where), and this
+service never edits or removes an existing line. A request that repeats
+an existing MAC+hostname pair exactly is not a conflict -- it returns
+``200 {"status": "exists", "ip": "..."}`` instead, so retrying (or
+replaying, e.g. from an OpenTofu re-apply) an identical registration is
+always safe.
 
 **Fix:** if the existing reservation is wrong or needs to move, edit
 ``macaddr.txt`` by hand and run ``pihole_importer.py`` directly --
@@ -114,9 +118,10 @@ prompt:
 
     python3 /root/scripts/pihole_importer.py /root/scripts/macaddr.txt
 
-The reservation is already in ``macaddr.txt``, so re-running the importer
-(by hand, or by resubmitting the same request, which will now hit the
-409 in section 4) is all that's needed -- nothing needs to be re-added.
+The reservation is already in ``macaddr.txt``, so nothing needs to be
+re-added -- running the importer by hand is the fix. Resubmitting the
+same request instead returns ``200 {"status": "exists"}`` (section 4)
+without touching the importer, so it won't recover a failed import.
 
 7. Service won't start
 -------------------------

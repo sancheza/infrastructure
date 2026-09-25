@@ -68,10 +68,14 @@ Each step of ``process_reservation()``:
    ``MAC,IP,HOSTNAME`` rows.
 4. **Match section** -- ``host_type`` is matched case-insensitively
    against a section label; no match is a 404 listing the valid labels.
-5. **Reject duplicates** -- a MAC or hostname already present anywhere in
-   the file (any section) is a 409, naming the IP it already holds. This
-   is what keeps the file add-only: the same device can never end up with
-   two reservations.
+5. **Reject duplicates** -- a MAC or hostname already present under a
+   *different* hostname or MAC anywhere in the file (any section) is a
+   409, naming the IP it already holds. A request that exactly repeats an
+   existing MAC+hostname pair is instead a 200, returning that entry's IP
+   unchanged -- an idempotent repeat, not a conflict, so retrying (or
+   replaying) the same registration is always safe. This is what keeps
+   the file add-only: the same device can never end up with two
+   reservations.
 6. **Allocate** -- the first 4th-octet value in the section's range that
    isn't already used *anywhere in the file* becomes the new IP; an
    exhausted range is a 503.
