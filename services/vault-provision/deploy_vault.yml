@@ -44,6 +44,13 @@
         state: present
         update_cache: true
 
+    - name: Set VAULT_ADDR for interactive shells
+      ansible.builtin.copy:
+        dest: /etc/profile.d/vault.sh
+        content: |
+          export VAULT_ADDR=http://127.0.0.1:8200
+        mode: "0644"
+
     - name: Prepare Raft storage directory
       ansible.builtin.file:
         path: /opt/vault/data
@@ -112,6 +119,9 @@
       loop: "{{ vault_keys.unseal_keys_b64[:3] }}"
       register: unseal_result
       changed_when: "'Sealed: false' in unseal_result.stdout"
+      # 200 = unsealed and active, 429 = unsealed and standby; either means
+      # a prior run already unsealed it, so skip re-submitting keys.
+      when: vault_health.status not in [200, 429]
 
     - name: Enable KV v2 secret engine
       ansible.builtin.command: vault secrets enable -path=secret kv-v2
@@ -121,3 +131,12 @@
       register: engine_result
       failed_when: engine_result.rc != 0 and 'path is already in use' not in engine_result.stderr
       changed_when: engine_result.rc == 0
+
+    - name: Verify Vault is unsealed and reachable
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:8200/v1/sys/health"
+        status_code: [200, 429]
+      register: final_health
+      retries: 3
+      delay: 2
+      until: final_health.status in [200, 429]
