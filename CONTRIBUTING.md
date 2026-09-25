@@ -24,9 +24,10 @@ Thank you for your interest in contributing! This project is a collection of use
 
 ## Coding Standards
 
-- **Python**: Use PEP 8 standards. We use `flake8` for linting.
-- **Shell**: Use `shellcheck` to verify script safety and compatibility.
+- **Python**: Follow dev ADR 0004 (Google Python Style Guide baseline) and dev ADR 0005 (command-line conventions). Lint with `pylint`.
+- **Shell**: Follow dev ADR 0006 and verify scripts with `shellcheck`.
 - **Documentation**: New scripts must be added to the `README.md` with a description and usage examples.
+- **ADRs**: The dev-level ADRs are in the [engineering-standards repository](https://github.com/sancheza/engineering-standards) (`adr/`).
 
 ## Code of Conduct
 
