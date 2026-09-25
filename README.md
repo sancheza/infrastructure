@@ -167,6 +167,12 @@ Why it's useful: Tvheadend can fail quietly (a tuner drops, a muxer crashes) wit
 
 ---
 
+## Infrastructure Provisioning
+
+`services/` holds OpenTofu and Ansible pipelines that provision infrastructure end-to-end, distinct from the standalone scripts above. Start with [services/opentofu_ansible_setup_guide.md](services/opentofu_ansible_setup_guide.md) (one-time runner setup) and [services/lxc_instance_provisioning_guide.md](services/lxc_instance_provisioning_guide.md) (the provisioning pattern, with [services/vault-provision/](services/vault-provision/) as the worked example).
+
+---
+
 ## Documentation
 
 Full Sphinx docs for every tool in this repo are in `docs/`. Rebuild with:

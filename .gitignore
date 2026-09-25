@@ -63,5 +63,21 @@ temp/
 ./learn*/
 ./myiac*/
 
-# Temporary shell scripts
-run*.sh
+# Temporary shell scripts (repo-root only; services/*/run.sh wrappers are tracked)
+/run*.sh
+
+# OpenTofu / Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Vault unseal keys / root token (also caught by the blanket *.json rule above)
+vault-cluster-keys.json
