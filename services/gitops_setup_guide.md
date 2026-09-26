@@ -157,10 +157,28 @@ Plain bridge networking (no `--net=host`) is enough here: the runner's container
 
 Install the GitHub CLI and this extension on the runner LXC itself, not inside any Docker container: the systemd service below execs `/usr/bin/gh` directly as a host process, so `gh` has to exist there for it to find.
 
+Install `gh` itself first (official apt repo, matching the same pattern already used for Docker's own repo in [opentofu_ansible_setup_guide.md](opentofu_ansible_setup_guide.md)):
+
+```bash
+(type -p wget >/dev/null || (apt update && apt install wget -y)) \
+	&& mkdir -p -m 755 /etc/apt/keyrings \
+	&& out=$(mktemp) && wget -nv -O$out https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+	&& cat $out | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+	&& chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+	&& mkdir -p -m 755 /etc/apt/sources.list.d \
+	&& echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+	&& apt update \
+	&& apt install gh -y
+```
+
+Then the extension and auth:
+
 ```bash
 gh extension install cli/gh-webhook
-gh auth refresh -h github.com -s admin:repo_hook
+gh auth login --hostname github.com --scopes admin:repo_hook
 ```
+
+`gh auth login` (not `gh auth refresh`, which only modifies an *existing* authenticated session) is the actual first login on a fresh `gh` install. This LXC has no browser, but the device-flow login still works headless: the command prints a one-time code and a URL, which you open and enter on any other device (your phone, your laptop) to complete the login; the runner's own `gh` session picks it up once you do.
 
 Run it as a systemd service so it survives reboots and reconnects on its own:
 
