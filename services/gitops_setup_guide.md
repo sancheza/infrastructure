@@ -320,6 +320,8 @@ Check `atlantis.yaml` (repo root), `repos.yaml`, and `docker-compose.yml` into g
 
 No SSH to the runner, no manual `git pull`, for any of this.
 
+**This is the pattern in the abstract.** For an actual, concrete run through these same five steps against a real service, watched end to end including the failures hit along the way and how each was fixed, see [deploying_a_new_service.md](deploying_a_new_service.md).
+
 ## 7. `terraform.tfvars` in an ephemeral clone: resolved, not deferred
 
 Atlantis clones this repo into its **own** ephemeral workspace per PR/project (`/atlantis/repos/...` inside its container), not the long-lived `/opt/infra/infrastructure` checkout used for manual runs. Since `terraform.tfvars` is gitignored (by design: it holds real credentials), it does not exist in that ephemeral clone on its own, and `tofu plan` fails on missing required variables without help. Confirmed by a real test PR reaching exactly that failure (`No value for required variable` for `pve_endpoint`, `pve_api_token`, and every other variable `terraform.tfvars` would supply) before this section's fix existed.

@@ -23,7 +23,7 @@ A few grounding questions worth answering plainly before the specifics, since th
 | `run.sh` | Wrapper for running `tofu`/`ansible-playbook` by hand from this directory, outside of Atlantis. |
 | `terraform.tfvars.example` | Placeholder values for the real, gitignored `terraform.tfvars` this service needs. |
 
-With that grounding, here are the three questions this document exists to answer, and why each one is worth asking explicitly rather than assuming an answer.
+With that grounding, three more specific points are worth being explicit about below, since assuming an answer to any of them, in either direction, leads somewhere unproductive.
 
 **Does deploying a service like Vault need a separate Terraform module or Ansible playbook?** Worth asking because the two halves have different answers, and guessing wrong in either direction leads somewhere unproductive: assuming a module is needed sends you looking for one that doesn't exist; assuming the playbook can be shared risks trying to make one playbook install multiple different pieces of software. The actual answer: no separate *module* (`main.tf` is a complete, standalone file per service, not a caller of shared module code; see `lxc_instance_provisioning_guide.md` for why a module isn't worth the indirection at this repo's current scale). A separate *playbook*, always: `deploy_vault.yml` is Vault-specific by design and could never be shared with another service, since it installs different software.
 
