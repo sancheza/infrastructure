@@ -169,7 +169,7 @@ Why it's useful: Tvheadend can fail quietly (a tuner drops, a muxer crashes) wit
 
 ## Infrastructure Provisioning
 
-`services/` holds OpenTofu and Ansible pipelines that provision infrastructure end-to-end, distinct from the standalone scripts above. Start with [services/opentofu_ansible_setup_guide.md](services/opentofu_ansible_setup_guide.md) (one-time runner setup) and [services/lxc_instance_provisioning_guide.md](services/lxc_instance_provisioning_guide.md) (the provisioning pattern, with [services/vault-provision/](services/vault-provision/) as the worked example). [services/gitops_setup_guide.md](services/gitops_setup_guide.md) covers automating that pipeline with Atlantis, so a merged PR applies changes with no manual `git pull`/`tofu apply`.
+`services/` holds OpenTofu and Ansible pipelines that provision infrastructure end-to-end, distinct from the standalone scripts above. Start with [services/opentofu_ansible_setup_guide.md](services/opentofu_ansible_setup_guide.md) (one-time runner setup) and [services/lxc_instance_provisioning_guide.md](services/lxc_instance_provisioning_guide.md) (the provisioning pattern, with [services/vault-provision/](services/vault-provision/) as the worked example). [services/gitops_setup_guide.md](services/gitops_setup_guide.md) covers automating that pipeline with Atlantis, so a merged PR applies changes with no manual `git pull`/`tofu apply`. [services/deploying_a_new_service.md](services/deploying_a_new_service.md) ties all three together into the actual end-to-end path, from an empty service directory to a running, GitOps-managed service.
 
 ---
 
