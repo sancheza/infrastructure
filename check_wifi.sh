@@ -50,6 +50,45 @@
 #
 # ==============================================================================
 
+# --- Help Function ---
+show_help() {
+    cat << EOF
+check_wifi.sh - Wi-Fi Signal Strength (RSSI) Monitor
+
+USAGE:
+  macOS:         sudo ./check_wifi.sh
+  Linux/Windows: ./check_wifi.sh   (no sudo needed)
+
+OPTIONS:
+  -h, --help     Show this help message and exit.
+
+DESCRIPTION:
+  Continuously monitors and displays Wi-Fi signal strength (RSSI, in dBm)
+  as a live, in-place dashboard with running session stats (min / max / mean /
+  median / std dev) and a color-coded quality key.
+
+PLATFORMS:
+  - macOS:   requires root (sudo) via wdutil. Real dBm.
+  - Linux:   via iw or iwconfig (real dBm), falling back to nmcli (approximate).
+  - Windows: via WSL, Git Bash, MSYS2, or Cygwin using netsh.exe (approximate).
+EOF
+}
+
+# --- Option Parsing ---
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Error: Unknown option $1" >&2
+            show_help >&2
+            exit 1
+            ;;
+    esac
+done
+
 detect_platform() {
     case "$(uname -s)" in
         Darwin) echo "macos" ;;
