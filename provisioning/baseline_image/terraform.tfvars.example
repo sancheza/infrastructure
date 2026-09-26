@@ -16,24 +16,24 @@ pve_node_name = "proxmox"
 ssh_public_key = "ssh-ed25519 AAAAC3NzaC1l... root@opentofu"
 
 # *NOTE: EDIT REQUIRED* - Set to your personal/admin public key for direct human SSH access
-vault_admin_ssh_key = "ssh-ed25519 AAAAC3NzaC1l... you@example.com"
+baseline_image_admin_ssh_key = "ssh-ed25519 AAAAC3NzaC1l... you@example.com"
 
 # *NOTE: EDIT REQUIRED* - Specify VMID for the Vault LXC (default 133)
-vault_vmid = 133
+baseline_image_vmid = 133
 
 # *NOTE: EDIT REQUIRED* - Set the exact deterministic MAC address to assign to Vault
 # Use the following command on the Proxmox host to find a free one:
 #   while MAC=$(printf 'BC:24:11:%02X:%02X:%02X\n' $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))
 #   grep -rqsi "$MAC" /etc/pve/lxc /etc/pve/qemu-server; do :; done; echo "$MAC"
-vault_mac_address = "BC:24:11:0B:E1:31"
+baseline_image_mac_address = "BC:24:11:0B:E1:31"
 
 # *NOTE: EDIT REQUIRED* - Set the hostname for the Vault LXC
-vault_hostname = "vault"
+baseline_image_hostname = "vault"
 
 # *NOTE: EDIT REQUIRED* - Set the Pi-hole host_type reservation section this host belongs to
 # Check valid labels with:
 #   ssh root@<pihole-host> "grep -E '^#.*\.[0-9]{1,3}\s+to\s+\.[0-9]{1,3}' /root/scripts/macaddr.txt"
-vault_host_type = "Servers"
+baseline_image_host_type = "Servers"
 
 # *NOTE: EDIT REQUIRED* - Set target Proxmox storage pool (e.g., local-lvm, local-zfs)
 pve_storage_pool = "local-zfs"
