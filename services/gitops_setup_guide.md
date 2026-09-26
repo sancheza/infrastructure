@@ -86,6 +86,13 @@ cd /opt/infra/infrastructure
 docker build -t infra-atlantis:latest -f services/runner-image/Dockerfile.atlantis services/runner-image
 ```
 
+**`USER atlantis` (the last line above) has a real consequence worth knowing before it bites you: everything Atlantis runs is non-root, UID 100.** `run.sh`'s `infra-runner` containers run as root, so they can read anything under `/root` on the host without a second thought. Atlantis's container can't: `/root` itself is mode `700`, owned by `root:root`, in the base image, so UID 100 can't even traverse into it, regardless of what's bind-mounted underneath. Confirmed the hard way: mounting a properly-owned copy of the orchestration SSH key at `/root/.ssh` still failed with `Permission denied`, because the block was `/root` itself, not the key's own permissions. The fix used throughout this pipeline: never mount anything Atlantis needs at a path under `/root`. Two neutral, top-level mount points carry everything both execution paths (`run.sh` and Atlantis) need to share:
+
+- **`/keys`**: the orchestration SSH key, owned to match whichever container reads it (root for `run.sh`, UID 100/GID 1000 for Atlantis).
+- **`/secrets`**: anything a playbook needs to persist *across* separate runs, not just within one: `terraform.tfvars` for the `pre_workflow_hook` (§5), and any output a playbook writes for a later run to read back (§7 covers a real example: `vault-cluster-keys.json`).
+
+The same non-root constraint is also why `deploy_vault.yml`'s "Save unseal keys" task writes to `/secrets/vault-cluster-keys.json` rather than `{{ playbook_dir }}`-relative: `playbook_dir` is a fresh, disposable path inside whichever ephemeral clone happens to be running (§5 explains why Atlantis's clones are ephemeral per PR), readable by the PR run that wrote it, but gone by the time a *different* PR needs to read it back. A fixed, shared path is required for anything that must outlive a single PR's clone, independent of which user is reading it.
+
 ## 3. Run Atlantis
 
 ### 3.1 Create a dedicated GitHub token, not a reused one
@@ -254,7 +261,9 @@ sudo systemctl status atlantis-webhook-forward
 
 ## 5. atlantis.yaml: one config that survives the pending repo-structure decision
 
-`vault-provision` is being generalized into the template for future services, and whether that lands as a shared Terraform module or a copyable-per-service `main.tf` is still an open decision elsewhere in this repo. This config doesn't need that decided first: `autodiscover` finds any directory containing `.tf` files without you having to list each `services/<name>-provision/` by hand.
+`vault-provision` is being generalized into the template for future services, and whether that lands as a shared Terraform module or a copyable-per-service `main.tf` is still an open decision elsewhere in this repo. This config doesn't need that decided first.
+
+**`autodiscover` alone does not bind a project to a custom workflow.** The first version of this section claimed it did; a real end-to-end test proved otherwise. `autodiscover: mode: enabled` still finds every `.tf`-containing directory automatically (so you never have to tell Atlantis a new service directory *exists*), but a discovered project with no explicit `workflow:` runs Atlantis's own built-in default workflow, silently, with no error: `tofu apply` succeeds and the whole `run: ansible-playbook ...` step just never happens. The fix, confirmed working: an explicit `projects:` entry naming the workflow, one per service.
 
 ```yaml
 # atlantis.yaml, repo root
@@ -262,7 +271,11 @@ version: 3
 automerge: false
 
 autodiscover:
-  mode: auto
+  mode: enabled
+
+projects:
+- dir: services/vault-provision
+  workflow: lxc-instance
 
 workflows:
   lxc-instance:
@@ -276,18 +289,26 @@ workflows:
         - run: ansible-playbook deploy_*.yml
 ```
 
+`autodiscover.mode: enabled` (not `auto`) matters here specifically because an explicit `projects:` entry now exists: `auto` mode only autodiscovers when *no* projects are configured at all, so once you add one explicit project (as above), `auto` would stop autodiscovering anything else. `enabled` keeps autodiscovering every other directory unconditionally, while the explicit entry above takes precedence for `services/vault-provision` specifically. **Every new service needs one more entry under `projects:`** naming its own directory (same `workflow: lxc-instance` value works for all of them; the workflow itself doesn't need repeating).
+
 The `apply` workflow's `run:` step is a plain process invocation, not a `docker run`: `ansible-playbook` is already on `PATH` inside Atlantis's own container (§2), so this needs nothing more than the command itself.
 
-**A repo-level `atlantis.yaml` defining a custom `workflows:` block is rejected by default**, server-side: Atlantis refuses it with `repo config not allowed to define custom workflows: server-side config needs 'allow_custom_workflows: true'`, confirmed by opening a real test PR against this config before the rest of this section existed. Custom workflows can run arbitrary shell commands, so Atlantis requires the server operator to explicitly opt a repo in, separately from whatever the repo itself commits. Since the server operator and repo owner are the same person here, that's just a config file to add, not a real barrier: [services/runner-image/repos.yaml](runner-image/repos.yaml) (tracked, mounted into Atlantis at `/atlantis-config/repos.yaml`, referenced via `ATLANTIS_REPO_CONFIG` in `docker-compose.yml`).
+**Two separate server-side permissions are required, not one.** A repo-level `atlantis.yaml` defining a custom `workflows:` block is rejected by default (`repo config not allowed to define custom workflows: server-side config needs 'allow_custom_workflows: true'`), and separately, a project setting an explicit `workflow:` key is *also* rejected by default (`repo config not allowed to set 'workflow' key: server-side config needs 'allowed_overrides: [workflow]'`). Both were hit for real, in that order, against this exact config. Custom workflows run arbitrary shell commands, so Atlantis requires the server operator to opt a repo into each capability separately from whatever the repo itself commits. Since the server operator and repo owner are the same person here, that's just a config file to add, not a real barrier: [services/runner-image/repos.yaml](runner-image/repos.yaml) (tracked, mounted into Atlantis at `/atlantis-config/repos.yaml`, referenced via `ATLANTIS_REPO_CONFIG` in `docker-compose.yml`).
 
 ```yaml
 # services/runner-image/repos.yaml
 repos:
 - id: github.com/sancheza/infrastructure
   allow_custom_workflows: true
+  allowed_overrides: [workflow]
+  pre_workflow_hooks:
+    - run: cp /atlantis/secrets/vault-provision.tfvars $DIR/services/vault-provision/terraform.tfvars
+      description: Supply terraform.tfvars for vault-provision (gitignored, not in the clone)
 ```
 
-Check both `atlantis.yaml` (repo root) and the `repos.yaml`/`docker-compose.yml` changes into git and push. `atlantis.yaml` itself needs no restart, Atlantis reads it fresh on every event; `repos.yaml` and `docker-compose.yml` do need one, since they're loaded at container startup (`cd .../services/runner-image && docker compose up -d`, §3.2).
+(§7 covers what that `pre_workflow_hooks` entry is for and why it's shaped this way.)
+
+Check `atlantis.yaml` (repo root), `repos.yaml`, and `docker-compose.yml` into git and push. `atlantis.yaml` itself needs no restart, Atlantis reads it fresh on every event; `repos.yaml` and `docker-compose.yml` do need one, since they're loaded at container startup (`cd .../services/runner-image && docker compose up -d`, §3.2, or `docker restart atlantis` if only `repos.yaml`'s *content* changed and compose doesn't detect anything to recreate).
 
 ## 6. Day-to-day: how a change actually ships now
 
@@ -299,21 +320,21 @@ Check both `atlantis.yaml` (repo root) and the `repos.yaml`/`docker-compose.yml`
 
 No SSH to the runner, no manual `git pull`, for any of this.
 
-## 7. Known gap, deliberately deferred: `terraform.tfvars`
+## 7. `terraform.tfvars` in an ephemeral clone: resolved, not deferred
 
-Atlantis clones this repo into its **own** ephemeral workspace per PR/project (under `/opt/infra/atlantis-data/repos/...`), not the long-lived `/opt/infra/infrastructure` checkout used for manual runs. Since `terraform.tfvars` is gitignored (by design: it holds real credentials), it does not exist in that ephemeral clone, and `tofu plan` fails on missing required variables. Confirmed, not just predicted: a real test PR against this exact config reached `tofu init` successfully, then failed `plan` with `No value for required variable` for every variable `terraform.tfvars` would otherwise supply (`pve_endpoint`, `pve_api_token`, `pve_node_name`, and so on): the one and only gap this pipeline hits end-to-end.
+Atlantis clones this repo into its **own** ephemeral workspace per PR/project (`/atlantis/repos/...` inside its container), not the long-lived `/opt/infra/infrastructure` checkout used for manual runs. Since `terraform.tfvars` is gitignored (by design: it holds real credentials), it does not exist in that ephemeral clone on its own, and `tofu plan` fails on missing required variables without help. Confirmed by a real test PR reaching exactly that failure (`No value for required variable` for `pve_endpoint`, `pve_api_token`, and every other variable `terraform.tfvars` would supply) before this section's fix existed.
 
-**This is intentionally left as a to-do, not solved here.** The immediate, unblocking stopgap once you're ready to test this end-to-end: an Atlantis [`pre_workflow_hook`](https://www.runatlantis.io/docs/pre-workflow-hooks) that copies a real tfvars file from a fixed path on `/opt/infra/atlantis-data` (outside any repo clone) into the ephemeral workspace before `plan` runs, e.g.:
+**The fix, verified working end-to-end**: the `pre_workflow_hooks` entry already shown in §5, supplying the file from a fixed path before `plan`/`apply` run:
 
 ```yaml
-# server-side repo config, not atlantis.yaml
-pre-workflow-hooks:
-  - run: cp /atlantis/secrets/vault-provision.tfvars terraform.tfvars
+pre_workflow_hooks:
+  - run: cp /atlantis/secrets/vault-provision.tfvars $DIR/services/vault-provision/terraform.tfvars
+    description: Supply terraform.tfvars for vault-provision (gitignored, not in the clone)
 ```
 
-Remember to replace `vault-provision.tfvars` with the actual filename you place at `/atlantis/secrets/` on the Atlantis host, and add one `run:` line per service workspace as more are added.
+`$DIR` is Atlantis's own environment variable for "the absolute path to the root of the cloned repository" (documented, not guessed), which is why the destination is `$DIR/services/vault-provision/...` rather than a bare relative filename: `pre_workflow_hooks` run once per PR at the repo root, before any specific project's workflow, not inside a project's own directory. **Add one more `run:` line, with its own destination path, per service** as more are added; there's no way to write a single glob-style line that covers every service's tfvars at once, since each one needs a different real file.
 
-That still means a real secrets file sitting on the Atlantis host, placed there by hand once: no different in kind from today's manual setup, just relocated. The actual follow-up (tracked separately, not part of this document): move off plaintext `tfvars` entirely, toward `TF_VAR_*` environment variables injected server-side or, longer-term, Vault-issued secrets once Vault itself is stood up. Fitting, since this pipeline is what provisions Vault in the first place.
+The source file itself, `/atlantis/secrets/vault-provision.tfvars`, is a real secrets file placed on the Atlantis host by hand once (`/opt/infra/atlantis-data/secrets/vault-provision.tfvars` on the host, `chown`'d to match Atlantis's non-root UID per the note in §2, `chmod 600`): no different in kind from today's manual setup, just relocated to a place every PR's ephemeral clone can reach. The actual follow-up (tracked separately, not part of this document): move off plaintext `tfvars` entirely, toward `TF_VAR_*` environment variables injected server-side or, longer-term, Vault-issued secrets once Vault itself is stood up. Fitting, since this pipeline is what provisions Vault in the first place.
 
 ## 8. Troubleshooting
 
@@ -321,4 +342,12 @@ That still means a real secrets file sitting on the Atlantis host, placed there 
 
 **`gh webhook forward` exits with `Hook already exists`**: another forwarder (or a stale one from a prior run) already registered against this repo. `gh api -X GET /repos/sancheza/infrastructure/hooks` lists them; delete the stale one and restart the service.
 
-**Plan fails with a missing-variable error**: expected until §7's stopgap (or its real fix) is in place. This isn't a bug in the Atlantis setup itself.
+**Plan fails with a missing-variable error** (`No value for required variable`): §7's `pre_workflow_hooks` isn't running, isn't configured for this project's directory, or `repos.yaml` hasn't been picked up yet (it loads at container startup; `docker restart atlantis` after any `repos.yaml` change, per §5). Check the PR's own checks for a separate `pre_workflow_hook` status entry: it reports success/failure independently of `plan`, and a failed hook still lets `plan` run anyway (`fail-on-pre-workflow-hook-error` isn't set), producing exactly this downstream error with the real cause one check up.
+
+**`repo config not allowed to define custom workflows`**: `allow_custom_workflows: true` missing from this repo's entry in `repos.yaml` (§5). Requires a container restart to take effect, not just a file edit.
+
+**`repo config not allowed to set 'workflow' key`**: `allowed_overrides: [workflow]` missing from the same `repos.yaml` entry (§5), a separate permission from `allow_custom_workflows` above; both are required together for an explicit `projects:` entry to bind a workflow.
+
+**`Error acquiring the state lock` / `open /tfstate/....tfstate: permission denied`, or an Ansible task failing with `no such identity: ...: Permission denied`**: a host directory mounted into Atlantis isn't owned to match its container's UID/GID. Check with `docker exec atlantis id` (expect `uid=100(atlantis) gid=1000(atlantis)`), then `chown -R 100:1000` whichever host directory the failing mount points at (`/opt/infra/tfstate`, `/opt/infra/atlantis-ssh`, `/opt/infra/atlantis-data/secrets`). See §2's note on why this bites specifically for anything mounted under `/root`.
+
+**An Ansible task fails with `Unable to access the file '/secrets/....json'`**: either a *different* project's PR wrote that file to a `playbook_dir`-relative path instead of `/secrets` (an older version of `deploy_<service>.yml`, or a custom copy that didn't follow §2's guidance), or the service has never successfully completed a full init before, so the file has never been written yet, which is expected. Check `deploy_<service>.yml`'s own read/write tasks for this file both use the fixed `/secrets/...` path, not `playbook_dir`.
