@@ -1,5 +1,5 @@
 # Copy this file to terraform.tfvars (gitignored) and fill in real values.
-# Never commit terraform.tfvars — it holds live credentials.
+# Never commit terraform.tfvars: it holds live credentials.
 
 # *NOTE: EDIT REQUIRED* - Set to your Proxmox node API endpoint IP and port
 pve_endpoint = "https://192.168.1.10:8006/"

@@ -1,0 +1,21 @@
+FROM ghcr.io/runatlantis/atlantis:latest-debian-slim
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-venv \
+    curl \
+    jq \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir --break-system-packages \
+    ansible-core \
+    hvac
+
+# OpenTofu itself, matching the version already pinned in
+# services/*/.terraform.lock.hcl
+COPY --from=ghcr.io/opentofu/opentofu:minimal /usr/local/bin/tofu /usr/local/bin/tofu
+
+USER atlantis
