@@ -278,9 +278,16 @@ workflows:
 
 The `apply` workflow's `run:` step is a plain process invocation, not a `docker run`: `ansible-playbook` is already on `PATH` inside Atlantis's own container (§2), so this needs nothing more than the command itself.
 
-Bind each project to this workflow, either per-project in this same file once you know the final directory layout, or, if `autodiscover` alone is enough for your case, via server-side default workflow config (`--default-workflow=lxc-instance` roughly captures the idea; check `atlantis server --help` against your installed version, since server-config flags shift between releases).
+**A repo-level `atlantis.yaml` defining a custom `workflows:` block is rejected by default**, server-side: Atlantis refuses it with `repo config not allowed to define custom workflows: server-side config needs 'allow_custom_workflows: true'`, confirmed by opening a real test PR against this config before the rest of this section existed. Custom workflows can run arbitrary shell commands, so Atlantis requires the server operator to explicitly opt a repo in, separately from whatever the repo itself commits. Since the server operator and repo owner are the same person here, that's just a config file to add, not a real barrier: [services/runner-image/repos.yaml](runner-image/repos.yaml) (tracked, mounted into Atlantis at `/atlantis-config/repos.yaml`, referenced via `ATLANTIS_REPO_CONFIG` in `docker-compose.yml`).
 
-Check `atlantis.yaml` into the repo root and push. Atlantis picks it up automatically on the next event for that repo, no restart needed.
+```yaml
+# services/runner-image/repos.yaml
+repos:
+- id: github.com/sancheza/infrastructure
+  allow_custom_workflows: true
+```
+
+Check both `atlantis.yaml` (repo root) and the `repos.yaml`/`docker-compose.yml` changes into git and push. `atlantis.yaml` itself needs no restart, Atlantis reads it fresh on every event; `repos.yaml` and `docker-compose.yml` do need one, since they're loaded at container startup (`cd .../services/runner-image && docker compose up -d`, §3.2).
 
 ## 6. Day-to-day: how a change actually ships now
 

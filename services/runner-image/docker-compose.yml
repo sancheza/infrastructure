@@ -7,9 +7,11 @@ services:
       - .env
     environment:
       - ATLANTIS_DEFAULT_TF_DISTRIBUTION=opentofu
+      - ATLANTIS_REPO_CONFIG=/atlantis-config/repos.yaml
     ports:
       - "127.0.0.1:4141:4141"
     volumes:
       - /opt/infra/atlantis-data:/atlantis
       - /root/.ssh:/root/.ssh:ro
+      - ./repos.yaml:/atlantis-config/repos.yaml:ro
     command: server
