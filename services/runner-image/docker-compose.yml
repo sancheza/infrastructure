@@ -12,7 +12,7 @@ services:
       - "127.0.0.1:4141:4141"
     volumes:
       - /opt/infra/atlantis-data:/atlantis
-      - /root/.ssh:/root/.ssh:ro
+      - /opt/infra/atlantis-ssh:/keys:ro
       - ./repos.yaml:/atlantis-config/repos.yaml:ro
       - /opt/infra/tfstate:/tfstate
     command: server
