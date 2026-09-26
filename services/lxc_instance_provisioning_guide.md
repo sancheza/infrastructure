@@ -1,26 +1,28 @@
 # LXC Instance Provisioning Guide
 
-This guide covers the OpenTofu and Ansible pattern used to provision an LXC container on Proxmox VE, register it with the Pi-hole DHCP/DNS reservation microservice, and configure it with Ansible, from an empty service directory to a running, configured host. [services/vault-provision/](vault-provision/) is the worked example; to provision a different service, copy that directory's structure and substitute your own values and playbook.
+This guide covers the OpenTofu and Ansible pattern used to provision an LXC container on Proxmox VE, register it with the Pi-hole DHCP/DNS reservation microservice, and configure it with Ansible, from an empty service directory to a running, configured host. [services/baseline_image-provision/](baseline_image-provision/) is the worked example (it deploys HashiCorp Vault); to provision a different service, copy that directory's structure and substitute your own values and playbook.
 
 This guide assumes the runner environment from [opentofu_ansible_setup_guide.md](opentofu_ansible_setup_guide.md) is already set up and this repository is cloned to `/opt/infra/infrastructure` on the runner.
 
 ## 1. Naming convention
 
-Each instance gets its own directory at `services/<service>-provision/` (e.g. `services/vault-provision/`) and its own set of OpenTofu variables prefixed with the service name (e.g. `vault_vmid`, `vault_hostname`). Variables shared across every instance (Proxmox connection details, the orchestration SSH key, storage pool, template, and Pi-hole service credentials) keep their generic names (`pve_endpoint`, `ssh_public_key`, `pve_storage_pool`, `pve_template_id`, `pihole_service_url`, `pihole_api_key`) and can be copied between workspaces unchanged.
+Each instance gets its own directory at `services/<service>-provision/` (e.g. `services/baseline_image-provision/`) and its own set of OpenTofu variables prefixed with the service name (e.g. `baseline_image_vmid`, `baseline_image_hostname`). Variables shared across every instance (Proxmox connection details, the orchestration SSH key, storage pool, template, and Pi-hole service credentials) keep their generic names (`pve_endpoint`, `ssh_public_key`, `pve_storage_pool`, `pve_template_id`, `pihole_service_url`, `pihole_api_key`) and can be copied between workspaces unchanged.
 
-| Purpose | Variable pattern | Vault example |
+The `<service>` token is an organizational label, not the name of the software being installed — pick something distinct enough to find-and-replace safely (Section 1's rename walkthrough below relies on it not colliding with anything else in the directory, including the actual product name a playbook installs).
+
+| Purpose | Variable pattern | baseline_image example |
 |---|---|---|
-| Container ID | `<service>_vmid` | `vault_vmid = 133` |
-| Hostname | `<service>_hostname` | `vault_hostname = "vault"` |
-| MAC address | `<service>_mac_address` | `vault_mac_address = "BC:24:11:0B:E1:31"` |
-| Pi-hole reservation section | `<service>_host_type` | `vault_host_type = "Servers"` |
-| Admin SSH key | `<service>_admin_ssh_key` | `vault_admin_ssh_key = "ssh-ed25519 ..."` |
+| Container ID | `<service>_vmid` | `baseline_image_vmid = 133` |
+| Hostname | `<service>_hostname` | `baseline_image_hostname = "baseline_image"` |
+| MAC address | `<service>_mac_address` | `baseline_image_mac_address = "BC:24:11:0B:E1:31"` |
+| Pi-hole reservation section | `<service>_host_type` | `baseline_image_host_type = "Servers"` |
+| Admin SSH key | `<service>_admin_ssh_key` | `baseline_image_admin_ssh_key = "ssh-ed25519 ..."` |
 
 Each service directory holds the same six files:
 
 | File | Committed? | Edit per service? | Purpose |
 |---|---|---|---|
-| `main.tf` | Yes | Yes — rename the resource label and every `vault_*` variable to `<service>`/`<service>_*` | Resource definitions — see [vault-provision/main.tf](vault-provision/main.tf) |
+| `main.tf` | Yes | Yes — rename the resource label and every `baseline_image_*` variable to `<service>`/`<service>_*` | Resource definitions — see [baseline_image-provision/main.tf](baseline_image-provision/main.tf) |
 | `inventory.ini.tpl` | Yes | Yes — group name and `templatefile()` variable names, matching `main.tf` | Ansible inventory template |
 | `ansible.cfg` | Yes | No — identical across every instance | Ansible defaults |
 | `deploy_<service>.yml` | Yes | Yes — written from scratch past the three bootstrap tasks in Section 5 | Service-specific playbook |
@@ -29,32 +31,32 @@ Each service directory holds the same six files:
 | `terraform.tfvars` | **No** (gitignored) | — created once, by hand, on the runner | Real credentials |
 | `terraform.tfstate` | **No** (gitignored) | — | Local state |
 
-`ansible.cfg` is the only tracked file with no service-specific content — copy it unchanged. Every other tracked file has `vault`/`vault_*` references that must be replaced with the new service's name before use.
+`ansible.cfg` is the only tracked file with no service-specific content — copy it unchanged. `deploy_<service>.yml` is excluded from the bulk rename below on purpose: it's the one file that isn't following the naming-convention pattern at all, it's genuinely service-specific content, and it commonly contains the literal name of the software it installs (the shipped example installs literal HashiCorp Vault — package name, systemd service, `/etc/vault.d/`, the `vault` CLI — none of which is the `baseline_image_*` convention and none of which should ever be touched by this rename). Rename the file itself, then write its contents for the new service from scratch. Every other tracked file has `baseline_image`/`baseline_image_*` references that must be replaced with the new service's name before use.
 
-Rename the copied directory, then replace every `vault` reference across the tracked files in one pass — the `vault_` prefix (variable and template names) first, then the bare `vault` label (resource label, inventory group, and directory names):
+Do this in a local clone of this repository, not directly on the runner: it needs to be committed and pushed to actually take effect (Section 7). Rename the copied directory, then replace every `baseline_image` reference across the remaining tracked files in one pass — the `baseline_image_` prefix (variable and template names) first, then the bare `baseline_image` label (resource label, inventory group, and directory names):
 
 ```bash
 cd services
-cp -r vault-provision myservice-provision
+cp -r baseline_image-provision myservice-provision
 cd myservice-provision
-mv deploy_vault.yml deploy_myservice.yml
-grep -rl 'vault' -- main.tf inventory.ini.tpl ansible.cfg deploy_myservice.yml run.sh terraform.tfvars.example \
-  | xargs sed -i 's/vault_/myservice_/g; s/\bvault\b/myservice/g'
+mv deploy_baseline_image.yml deploy_myservice.yml
+grep -rl 'baseline_image' -- main.tf inventory.ini.tpl ansible.cfg run.sh terraform.tfvars.example \
+  | xargs sed -i 's/baseline_image_/myservice_/g; s/\bbaseline_image\b/myservice/g'
 ```
 
 `sed -i` above is the GNU syntax (matches the Debian 12 runner from the setup guide); on macOS, use `sed -i ''` instead. Confirm nothing was missed:
 
 ```bash
-grep -rn 'vault' main.tf inventory.ini.tpl ansible.cfg deploy_myservice.yml run.sh terraform.tfvars.example
+grep -rn 'baseline_image' main.tf inventory.ini.tpl ansible.cfg run.sh terraform.tfvars.example
 ```
 
 No output means every reference was renamed.
 
 ## 2. main.tf: the resource-ordering rule
 
-Read [services/vault-provision/main.tf](vault-provision/main.tf) for the full, current definition. Three points in it apply to every future instance, not just Vault:
+Read [services/baseline_image-provision/main.tf](baseline_image-provision/main.tf) for the full, current definition. Three points in it apply to every future instance, not just this one:
 
-**The Pi-hole reservation must be created before the container.** `null_resource.pihole_service_sync` has no `depends_on`, and `proxmox_virtual_environment_container.vault` has `depends_on = [null_resource.pihole_service_sync]`, the reverse of what you'd write if you provisioned the container first. This ordering matters: a container's first DHCP request happens as soon as it starts. If the DHCP/DNS reservation doesn't exist yet, that first lease can be a mismatched address that isn't corrected until the next lease renewal (e.g., on reboot). Creating the reservation first means the container's very first boot already resolves correctly.
+**The Pi-hole reservation must be created before the container.** `null_resource.pihole_service_sync` has no `depends_on`, and `proxmox_virtual_environment_container.baseline_image` has `depends_on = [null_resource.pihole_service_sync]`, the reverse of what you'd write if you provisioned the container first. This ordering matters: a container's first DHCP request happens as soon as it starts. If the DHCP/DNS reservation doesn't exist yet, that first lease can be a mismatched address that isn't corrected until the next lease renewal (e.g., on reboot). Creating the reservation first means the container's very first boot already resolves correctly.
 
 **`protection = true`** blocks accidental destroy or forced replacement through OpenTofu, a safeguard for any instance holding state that can't be trivially recreated (Vault's raft storage, in this example). To make an intentional destructive change, set it to `false` first, apply, then make the change.
 
@@ -74,12 +76,12 @@ grep -rqsi "$MAC" /etc/pve/lxc /etc/pve/qemu-server; do :; done; echo "$MAC"
 On the runner, inside the service directory:
 
 ```bash
-cd /opt/infra/infrastructure/services/vault-provision
+cd /opt/infra/infrastructure/services/baseline_image-provision
 cp terraform.tfvars.example terraform.tfvars
 chmod 600 terraform.tfvars
 ```
 
-Edit `terraform.tfvars` with real values: see [vault-provision/terraform.tfvars.example](vault-provision/terraform.tfvars.example) for the full set and what each one needs.
+Edit `terraform.tfvars` with real values: see [baseline_image-provision/terraform.tfvars.example](baseline_image-provision/terraform.tfvars.example) for the full set and what each one needs.
 
 **`host_type` must match a section label already defined in the Pi-hole microservice's reservations file exactly** (case-insensitive). Check the valid labels before setting this:
 
@@ -126,7 +128,7 @@ Validate before applying:
 
 The `admin_ssh_key` task uses `ansible.builtin.lineinfile`, part of `ansible-core`, rather than `ansible.posix.authorized_key`: the runner image only installs `ansible-core` (Section 3 of the setup guide), and `ansible.posix` is not a bundled collection.
 
-For the complete worked example, installing HashiCorp Vault, configuring raft storage, initializing and unsealing the cluster, and enabling the KV v2 engine, see [vault-provision/deploy_vault.yml](vault-provision/deploy_vault.yml).
+For the complete worked example, installing HashiCorp Vault, configuring raft storage, initializing and unsealing the cluster, and enabling the KV v2 engine, see [baseline_image-provision/deploy_baseline_image.yml](baseline_image-provision/deploy_baseline_image.yml).
 
 ## 6. Run the pipeline
 
@@ -162,6 +164,17 @@ Every file except `terraform.tfvars` and `terraform.tfstate` is version-controll
 4. Re-run `./run.sh tofu plan` from the service directory and review the diff before applying.
 
 **Always read the plan before applying**, especially after changing anything under `initialization` or `network_interface` in `main.tf`: some attribute changes update the container in place, and others (like the `user_account.keys` case in Section 2) force it to be destroyed and recreated. `tofu plan` shows which before anything happens.
+
+**Renaming a resource's local label on an already-applied instance needs a `moved` block.** OpenTofu tracks a resource by its address (type + label, e.g. `proxmox_virtual_environment_container.baseline_image`), not by its `hostname`/`vmid` values. Renaming just the label, without anything else, leaves the plan with no way to tell the old address apart from a deleted resource and a new one to create, so it proposes destroying the running container and recreating it under the new address. Add a `moved` block instead so the rename applies to state with no resource change:
+
+```hcl
+moved {
+  from = proxmox_virtual_environment_container.old_label
+  to   = proxmox_virtual_environment_container.new_label
+}
+```
+
+`tofu plan` after this shows the resource as moved, not destroyed. The `moved` block can be removed once it's been applied against the live instance; leaving it in place is also fine; it becomes a no-op on every later run.
 
 ## 8. Troubleshooting
 
