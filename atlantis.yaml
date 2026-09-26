@@ -2,7 +2,11 @@ version: 3
 automerge: false
 
 autodiscover:
-  mode: auto
+  mode: enabled
+
+projects:
+- dir: services/vault-provision
+  workflow: default
 
 workflows:
   default:
