@@ -171,3 +171,6 @@ output "assigned_mac" {
 output "assigned_host" {
   value = var.vault_hostname
 }
+
+# vault-rebuild-test: trigger a real end-to-end create via GitOps,
+# with the shared state backend and tfvars pre_workflow_hook in place.
