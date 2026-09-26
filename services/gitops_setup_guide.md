@@ -96,7 +96,7 @@ Use a token created specifically for Atlantis, not one already in use elsewhere 
 
 1. On GitHub: **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**.
 2. **Token name**: something identifiable, e.g. `atlantis-infrastructure`.
-3. **Expiration**: your choice; a fine-grained token can't be set to "no expiration", so pick a duration and put a reminder somewhere to rotate it before it lapses (Atlantis will start failing with auth errors once it does).
+3. **Expiration**: since `sancheza/infrastructure` is a personal repo, "No expiration" is a selectable option (GitHub caps this at 366 days by default only for organization-owned repos, not personal ones). Available doesn't mean advisable: a dated expiration forces periodic rotation, which is worth having even in a single-operator setup, so a duration (with a reminder to rotate before it lapses) is still the better default; pick "No expiration" only if you're deliberately trading that off for convenience.
 4. **Resource owner**: your account (`sancheza`).
 5. **Repository access**: "Only select repositories" → `sancheza/infrastructure`.
 6. **Permissions** (per [Atlantis's own access-credentials docs](https://www.runatlantis.io/docs/access-credentials)), under "Repository permissions":
@@ -111,6 +111,8 @@ This is narrower than a classic token's blanket `repo` scope (which grants acces
 **Known limitation**: fine-grained tokens have a documented gap with Atlantis's mergeability/branch-protection checks, specifically when `atlantis.yaml` sets `apply_requirements` like `approved` or `undiverged`. The config in §5 doesn't use `apply_requirements` (applies are triggered manually via PR comment instead), so this shouldn't bite here. If you add that gate later and Atlantis starts failing to fetch PR status, switch this token to a classic PAT (`repo` scope) or a GitHub App instead.
 
 **Going further** (optional): Atlantis's own docs recommend a dedicated bot GitHub account (e.g. a second free account named something like `atlantis-bot`) over any token on your personal account, specifically to keep automated PR comments visually distinct from your own. Worth doing if PR-comment clarity matters to you; a repo-scoped token on your existing account (above) is the pragmatic floor for a single-operator setup.
+
+**Where to keep a copy of this token**: `.env` (§3.2) is the live copy Atlantis actually reads, but keep a durable record of the value somewhere else too. A password manager is the primary place: it's the one location that survives even if the runner's disk is wiped. Once Vault itself is up, writing a second copy into its KV v2 engine (e.g. `secret/bootstrap/atlantis-gh-token`) is also worth doing, as a backup/audit record, **not** as something Atlantis reads from at startup: Vault is what this pipeline provisions, so if Atlantis's own credential only lived in Vault, a sealed Vault (after any reboot or bad apply) would block Atlantis from fetching the very token it needs to fix Vault. Keep the runtime copy in `.env`, independent of whether Vault happens to be reachable.
 
 ### 3.2 Configure and start it
 
