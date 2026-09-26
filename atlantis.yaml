@@ -6,10 +6,10 @@ autodiscover:
 
 projects:
 - dir: services/vault-provision
-  workflow: default
+  workflow: lxc-instance
 
 workflows:
-  default:
+  lxc-instance:
     plan:
       steps:
         - init
