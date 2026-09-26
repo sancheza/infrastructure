@@ -100,17 +100,20 @@
       when: vault_health.status == 501
       register: init_payload
 
-    - name: Save unseal keys to runner container storage
+    # /secrets is a fixed, shared path (not playbook_dir-relative): Atlantis
+    # runs each PR from its own throwaway clone directory, so a
+    # playbook_dir-relative path would be unreadable by any later PR.
+    - name: Save unseal keys to shared secrets storage
       ansible.builtin.copy:
         content: "{{ init_payload.stdout }}"
-        dest: "{{ playbook_dir }}/vault-cluster-keys.json"
+        dest: /secrets/vault-cluster-keys.json
         mode: '0600'
       delegate_to: localhost
       when: init_payload.changed
 
     - name: Read cluster keys
       ansible.builtin.set_fact:
-        vault_keys: "{{ lookup('file', playbook_dir + '/vault-cluster-keys.json') | from_json }}"
+        vault_keys: "{{ lookup('file', '/secrets/vault-cluster-keys.json') | from_json }}"
 
     - name: Unseal Vault
       ansible.builtin.command: "vault operator unseal {{ item }}"
