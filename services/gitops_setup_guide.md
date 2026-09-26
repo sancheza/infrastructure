@@ -8,6 +8,14 @@ This assumes [opentofu_ansible_setup_guide.md](opentofu_ansible_setup_guide.md) 
 git clone https://github.com/sancheza/infrastructure.git /opt/infra/infrastructure
 ```
 
+**If that checkout already exists** (it will, on a runner you've used before), don't re-clone: update it instead.
+
+```bash
+cd /opt/infra/infrastructure && git pull
+```
+
+Do this before following any step below whose file was added or changed after your last pull; e.g. `services/runner-image/Dockerfile.atlantis` and `services/runner-image/docker-compose.yml` (§2-3) only exist once this pull has happened.
+
 ## 1. Architecture
 
 ```
@@ -84,14 +92,19 @@ docker build -t infra-atlantis:latest -f services/runner-image/Dockerfile.atlant
 
 Use a token created specifically for Atlantis, not one already in use elsewhere (e.g. the GHCR pull token from `concertfinder`'s own hosting doc). A dedicated token limits blast radius if it ever leaks, can be revoked on its own without disrupting anything else, and (per Atlantis's own documentation) makes it obvious in PR comments that they came from the automation, not from you acting manually.
 
-**Fine-grained, repo-scoped token** (recommended default here): on GitHub, **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**.
+**Fine-grained, repo-scoped token** (recommended default here):
 
-- **Repository access**: "Only select repositories" → `sancheza/infrastructure`.
-- **Permissions** (per [Atlantis's own access-credentials docs](https://www.runatlantis.io/docs/access-credentials)):
-  - Contents: **Read-only**
-  - Commit statuses: **Read and write**
-  - Pull requests: **Read and write**
-  - Metadata: read-only (selected automatically)
+1. On GitHub: **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**.
+2. **Token name**: something identifiable, e.g. `atlantis-infrastructure`.
+3. **Expiration**: your choice; a fine-grained token can't be set to "no expiration", so pick a duration and put a reminder somewhere to rotate it before it lapses (Atlantis will start failing with auth errors once it does).
+4. **Resource owner**: your account (`sancheza`).
+5. **Repository access**: "Only select repositories" → `sancheza/infrastructure`.
+6. **Permissions** (per [Atlantis's own access-credentials docs](https://www.runatlantis.io/docs/access-credentials)), under "Repository permissions":
+   - Contents: **Read-only**
+   - Commit statuses: **Read and write**
+   - Pull requests: **Read and write**
+   - Metadata: read-only (selected automatically once any other permission is set)
+7. **Generate token**, then copy the value immediately: GitHub only shows it once.
 
 This is narrower than a classic token's blanket `repo` scope (which grants access to every repo the account can see), so prefer it unless you hit the caveat below.
 
