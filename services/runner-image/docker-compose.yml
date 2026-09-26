@@ -15,4 +15,5 @@ services:
       - /opt/infra/atlantis-ssh:/keys:ro
       - ./repos.yaml:/atlantis-config/repos.yaml:ro
       - /opt/infra/tfstate:/tfstate
+      - /opt/infra/atlantis-data/secrets:/secrets
     command: server
