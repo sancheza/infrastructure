@@ -155,7 +155,7 @@ Plain bridge networking (no `--net=host`) is enough here: the runner's container
 
 ## 4. Deliver webhooks with `gh webhook forward`, not a public endpoint
 
-Install the GitHub CLI and this extension on the runner:
+Install the GitHub CLI and this extension on the runner LXC itself, not inside any Docker container: the systemd service below execs `/usr/bin/gh` directly as a host process, so `gh` has to exist there for it to find.
 
 ```bash
 gh extension install cli/gh-webhook
