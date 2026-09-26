@@ -5,7 +5,7 @@ autodiscover:
   mode: auto
 
 workflows:
-  lxc-instance:
+  default:
     plan:
       steps:
         - init
