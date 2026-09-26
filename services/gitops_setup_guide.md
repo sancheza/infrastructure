@@ -301,7 +301,7 @@ No SSH to the runner, no manual `git pull`, for any of this.
 
 ## 7. Known gap, deliberately deferred: `terraform.tfvars`
 
-Atlantis clones this repo into its **own** ephemeral workspace per PR/project (under `/opt/infra/atlantis-data/repos/...`), not the long-lived `/opt/infra/infrastructure` checkout used for manual runs. Since `terraform.tfvars` is gitignored (by design: it holds real credentials), it does not exist in that ephemeral clone, and `tofu plan` will fail on missing required variables the first time this runs.
+Atlantis clones this repo into its **own** ephemeral workspace per PR/project (under `/opt/infra/atlantis-data/repos/...`), not the long-lived `/opt/infra/infrastructure` checkout used for manual runs. Since `terraform.tfvars` is gitignored (by design: it holds real credentials), it does not exist in that ephemeral clone, and `tofu plan` fails on missing required variables. Confirmed, not just predicted: a real test PR against this exact config reached `tofu init` successfully, then failed `plan` with `No value for required variable` for every variable `terraform.tfvars` would otherwise supply (`pve_endpoint`, `pve_api_token`, `pve_node_name`, and so on): the one and only gap this pipeline hits end-to-end.
 
 **This is intentionally left as a to-do, not solved here.** The immediate, unblocking stopgap once you're ready to test this end-to-end: an Atlantis [`pre_workflow_hook`](https://www.runatlantis.io/docs/pre-workflow-hooks) that copies a real tfvars file from a fixed path on `/opt/infra/atlantis-data` (outside any repo clone) into the ephemeral workspace before `plan` runs, e.g.:
 
