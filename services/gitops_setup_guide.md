@@ -136,13 +136,20 @@ ATLANTIS_REPO_ALLOWLIST=github.com/sancheza/infrastructure
 
 Remember to replace all four values in `.env`: `ATLANTIS_GH_USER` (the GitHub account that owns the token from §3.1, whether your own or a dedicated bot account), `ATLANTIS_GH_TOKEN` (the token itself), and `ATLANTIS_GH_WEBHOOK_SECRET` (generate one with `openssl rand -hex 32` and keep it; `ATLANTIS_REPO_ALLOWLIST` can usually stay as-is).
 
-Then start it:
+Then start it (still in `/opt/infra/infrastructure/services/runner-image`, where `docker-compose.yml` and `.env` both live):
 
 ```bash
 docker compose up -d
 ```
 
-**Whenever the image is rebuilt (§2) or `.env`/`docker-compose.yml` changes**, re-run that same `docker compose up -d`: it recreates the container from the current image and config, leaving `/opt/infra/atlantis-data` (Atlantis's own persistent state) untouched, the same update pattern already documented for other Docker-based services in this repo's ecosystem.
+**Whenever the image is rebuilt (§2) or `.env`/`docker-compose.yml` changes**, re-run that same command from this same directory:
+
+```bash
+cd /opt/infra/infrastructure/services/runner-image
+docker compose up -d
+```
+
+This recreates the container from the current image and config, leaving `/opt/infra/atlantis-data` (Atlantis's own persistent state) untouched, the same update pattern already documented for other Docker-based services in this repo's ecosystem. §2's rebuild command runs from the repo root (`/opt/infra/infrastructure`), not this directory, so don't assume the `cd` carries over from there.
 
 Plain bridge networking (no `--net=host`) is enough here: the runner's containers already reach the LAN (Proxmox API, Pi-hole, target hosts) over Docker's normal bridge, confirmed by testing directly rather than assumed. The compose file's `127.0.0.1:4141:4141` port binding is deliberate: Atlantis is reachable from this host only, never the LAN or internet. `gh webhook forward` (§4) is the only thing that talks to it. `/opt/infra/atlantis-data` is Atlantis's own persistent state (its BoltDB lock/PR database and its per-project ephemeral clones): back this up, or at least know it's there. Losing it loses in-flight PR lock state, not your actual infrastructure.
 
