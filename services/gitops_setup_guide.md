@@ -178,7 +178,13 @@ gh extension install cli/gh-webhook
 gh auth login --hostname github.com --scopes admin:repo_hook
 ```
 
-`gh auth login` (not `gh auth refresh`, which only modifies an *existing* authenticated session) is the actual first login on a fresh `gh` install. This LXC has no browser, but the device-flow login still works headless: the command prints a one-time code and a URL, which you open and enter on any other device (your phone, your laptop) to complete the login; the runner's own `gh` session picks it up once you do.
+`gh auth login` (not `gh auth refresh`, which only modifies an *existing* authenticated session) is the actual first login on a fresh `gh` install. It's interactive; answer its prompts exactly like this:
+
+1. **"What is your preferred protocol for Git operations on this host?"** → `HTTPS` (either works for what this guide needs `gh` for; HTTPS avoids also having to set up a separate SSH key for `gh` itself).
+2. **"Authenticate Git with your GitHub credentials?"** → `Yes`.
+3. **"How would you like to authenticate GitHub CLI?"** → **`Login with a web browser`**, not "Paste an authentication token". The token-paste option requires you to have already generated your own classic PAT (with `repo`, `read:org`, `workflow` scopes) somewhere else first, a separate manual step this guide doesn't otherwise need; picking the web-browser option instead has `gh` handle that negotiation itself, and is what actually produces the "log in from another device" flow below.
+
+Once you pick "Login with a web browser", `gh` prints a one-time code and a URL: open that URL on any other device (your phone, your laptop) and enter the code there to complete the login. The runner's own `gh` session picks it up as soon as you do, no browser needed on the LXC itself.
 
 Run it as a systemd service so it survives reboots and reconnects on its own:
 
