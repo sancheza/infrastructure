@@ -161,3 +161,6 @@ output "assigned_mac" {
 output "assigned_host" {
   value = var.vault_hostname
 }
+
+# atlantis-test-1: trivial comment-only change to trigger a real
+# Atlantis plan for end-to-end GitOps pipeline verification.
