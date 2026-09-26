@@ -107,6 +107,7 @@ Atlantis's config lives in [services/runner-image/docker-compose.yml](runner-ima
 mkdir -p /opt/infra/atlantis-data
 cd /opt/infra/infrastructure/services/runner-image
 cp .env.example .env
+chmod 600 .env
 ```
 
 Edit `.env` with real values:

@@ -55,6 +55,7 @@ Every provisioning workspace lives under `/opt/infra/infrastructure/services/<se
 ```bash
 cd /opt/infra/infrastructure/services/vault-provision
 cp terraform.tfvars.example terraform.tfvars
+chmod 600 terraform.tfvars
 # edit terraform.tfvars with real values
 ```
 

@@ -76,6 +76,7 @@ On the runner, inside the service directory:
 ```bash
 cd /opt/infra/infrastructure/services/vault-provision
 cp terraform.tfvars.example terraform.tfvars
+chmod 600 terraform.tfvars
 ```
 
 Edit `terraform.tfvars` with real values: see [vault-provision/terraform.tfvars.example](vault-provision/terraform.tfvars.example) for the full set and what each one needs.
