@@ -97,7 +97,7 @@ resource "proxmox_virtual_environment_container" "vault" {
   unprivileged  = true
   protection    = true
   start_on_boot = true
-  tags          = ["vault", "terraform-managed"]
+  tags          = ["vault", "terraform-managed", "gitops-verified-v2"]
 
   initialization {
     hostname = var.vault_hostname
@@ -171,3 +171,6 @@ output "assigned_mac" {
 output "assigned_host" {
   value = var.vault_hostname
 }
+
+# vault-rebuild-test: trigger a real end-to-end create via GitOps,
+# with the shared state backend and tfvars pre_workflow_hook in place.
