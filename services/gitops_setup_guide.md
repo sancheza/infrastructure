@@ -153,6 +153,39 @@ This recreates the container from the current image and config, leaving `/opt/in
 
 Plain bridge networking (no `--net=host`) is enough here: the runner's containers already reach the LAN (Proxmox API, Pi-hole, target hosts) over Docker's normal bridge, confirmed by testing directly rather than assumed. The compose file's `127.0.0.1:4141:4141` port binding is deliberate: Atlantis is reachable from this host only, never the LAN or internet. `gh webhook forward` (§4) is the only thing that talks to it. `/opt/infra/atlantis-data` is Atlantis's own persistent state (its BoltDB lock/PR database and its per-project ephemeral clones): back this up, or at least know it's there. Losing it loses in-flight PR lock state, not your actual infrastructure.
 
+### 3.3 Verify it's running
+
+Three independent checks, from least to most revealing. Each one narrows down where a problem is if a later one fails.
+
+**Container itself, no PR needed:**
+
+```bash
+docker ps --filter name=atlantis
+docker logs atlantis --tail 20
+```
+
+Look for `Atlantis started - listening on port 4141` in the logs, and a `STATUS` that isn't `Restarting` in `docker ps`. `(health: starting)` for the first several minutes is normal, not a fault: the base image's healthcheck runs every 5 minutes with no shorter initial check, so `docker ps` won't show `(healthy)` until the first one actually fires. To confirm the check itself would pass right now, without waiting:
+
+```bash
+docker exec atlantis sh -c 'curl -f http://localhost:4141/healthz'
+```
+
+**HTTP health check, still no PR needed** (run on the runner itself; the port is loopback-only, see above):
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4141/healthz
+```
+
+`200` means Atlantis is actually serving requests, not just that the process is running.
+
+**There is a web UI**, served at `/` on the same port: a status page listing recent plans/applies and any held locks. Since the port is deliberately bound to `127.0.0.1` only (not the LAN, not the internet), reaching it from your own machine needs an SSH tunnel, not a direct browser connection to the runner:
+
+```bash
+ssh -L 4141:127.0.0.1:4141 root@opentofu
+```
+
+Then open `http://127.0.0.1:4141/` in a browser on your own machine, for as long as that SSH session stays open. This is read-only visibility; it doesn't change how PRs actually get planned or applied, that's still driven entirely by GitHub events through §4.
+
 ## 4. Deliver webhooks with `gh webhook forward`, not a public endpoint
 
 Install the GitHub CLI and this extension on the runner LXC itself, not inside any Docker container: the systemd service below execs `/usr/bin/gh` directly as a host process, so `gh` has to exist there for it to find.
