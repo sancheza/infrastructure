@@ -22,7 +22,7 @@ terraform {
   # /tfstate is mounted from the same host directory in both run.sh and
   # Atlantis's docker-compose.yml, so both read/write the same file.
   backend "local" {
-    path = "/tfstate/baseline_image.tfstate"
+    path = "/tfstate/vault-provision.tfstate"
   }
 }
 
@@ -43,24 +43,25 @@ variable "ssh_public_key" {
   type = string
 }
 
-variable "baseline_image_admin_ssh_key" {
+variable "vault_admin_ssh_key" {
   type = string
 }
 
-variable "baseline_image_vmid" {
-  type = number
+variable "vault_vmid" {
+  type    = number
+  default = 133
 }
 
-variable "baseline_image_mac_address" {
+variable "vault_mac_address" {
   type = string
 }
 
-variable "baseline_image_hostname" {
+variable "vault_hostname" {
   type    = string
-  default = "baseline_image"
+  default = "vault"
 }
 
-variable "baseline_image_host_type" {
+variable "vault_host_type" {
   type    = string
   default = "Servers"
 }
@@ -90,16 +91,16 @@ provider "proxmox" {
 }
 
 # 1. Provision target LXC container
-resource "proxmox_virtual_environment_container" "baseline_image" {
+resource "proxmox_virtual_environment_container" "vault" {
   node_name     = var.pve_node_name
-  vm_id         = var.baseline_image_vmid
+  vm_id         = var.vault_vmid
   unprivileged  = true
   protection    = true
   start_on_boot = true
-  tags          = ["baseline_image", "terraform-managed"]
+  tags          = ["vault", "terraform-managed"]
 
   initialization {
-    hostname = var.baseline_image_hostname
+    hostname = var.vault_hostname
 
     ip_config {
       ipv4 {
@@ -115,7 +116,7 @@ resource "proxmox_virtual_environment_container" "baseline_image" {
   network_interface {
     name        = "eth0"
     bridge      = "vmbr0"
-    mac_address = var.baseline_image_mac_address
+    mac_address = var.vault_mac_address
   }
 
   cpu {
@@ -143,20 +144,20 @@ resource "proxmox_virtual_environment_container" "baseline_image" {
 # 2. Register MAC and Hostname via Pi-hole Microservice
 resource "null_resource" "pihole_service_sync" {
   triggers = {
-    mac_address = var.baseline_image_mac_address
-    hostname    = var.baseline_image_hostname
+    mac_address = var.vault_mac_address
+    hostname    = var.vault_hostname
   }
 
   provisioner "local-exec" {
-    command = "curl -fsSL -X POST \"${var.pihole_service_url}\" -H \"Authorization: Bearer ${var.pihole_api_key}\" -H \"Content-Type: application/json\" -d '{\"mac\": \"${var.baseline_image_mac_address}\", \"hostname\": \"${var.baseline_image_hostname}\", \"host_type\": \"${var.baseline_image_host_type}\"}'"
+    command = "curl -fsSL -X POST \"${var.pihole_service_url}\" -H \"Authorization: Bearer ${var.pihole_api_key}\" -H \"Content-Type: application/json\" -d '{\"mac\": \"${var.vault_mac_address}\", \"hostname\": \"${var.vault_hostname}\", \"host_type\": \"${var.vault_host_type}\"}'"
   }
 }
 
 # 3. Dynamic Ansible Inventory Output
 resource "local_file" "ansible_inventory" {
   content = templatefile("${path.module}/inventory.ini.tpl", {
-    baseline_image_hostname      = var.baseline_image_hostname
-    baseline_image_admin_ssh_key = var.baseline_image_admin_ssh_key
+    vault_hostname      = var.vault_hostname
+    vault_admin_ssh_key = var.vault_admin_ssh_key
   })
   filename = "${path.module}/inventory.ini"
 
@@ -164,9 +165,9 @@ resource "local_file" "ansible_inventory" {
 }
 
 output "assigned_mac" {
-  value = var.baseline_image_mac_address
+  value = var.vault_mac_address
 }
 
 output "assigned_host" {
-  value = var.baseline_image_hostname
+  value = var.vault_hostname
 }

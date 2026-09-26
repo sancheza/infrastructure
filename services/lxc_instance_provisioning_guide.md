@@ -1,6 +1,6 @@
 # LXC Instance Provisioning Guide
 
-This guide covers the OpenTofu and Ansible pattern used to provision an LXC container on Proxmox VE, register it with the Pi-hole DHCP/DNS reservation microservice, and configure it with Ansible, from an empty service directory to a running, configured host. [provisioning/baseline_image/](../provisioning/baseline_image/) is the worked example (it deploys HashiCorp Vault); to provision a different service, copy that directory's structure and substitute your own values and playbook.
+This guide covers the OpenTofu and Ansible pattern used to provision an LXC container on Proxmox VE, register it with the Pi-hole DHCP/DNS reservation microservice, and configure it with Ansible, from an empty service directory to a running, configured host. Two example directories illustrate this: [provisioning/vault/](../provisioning/vault/) is the real, deployed instance (it deploys HashiCorp Vault), and [provisioning/baseline_image/](../provisioning/baseline_image/) is a generic, undeployed template with no service installed — to provision a different service, copy `provisioning/baseline_image/`'s structure and substitute your own values and playbook.
 
 This guide assumes the runner environment from [opentofu_ansible_setup_guide.md](opentofu_ansible_setup_guide.md) is already set up and this repository is cloned to `/opt/infra/infrastructure` on the runner.
 
@@ -31,7 +31,7 @@ Each service directory holds the same six files:
 | `terraform.tfvars` | **No** (gitignored) | — created once, by hand, on the runner | Real credentials |
 | `terraform.tfstate` | **No** (gitignored) | — | Local state |
 
-`ansible.cfg` is the only tracked file with no service-specific content — copy it unchanged. `deploy_<service>.yml` is excluded from the bulk rename below on purpose: it's the one file that isn't following the naming-convention pattern at all, it's genuinely service-specific content, and it commonly contains the literal name of the software it installs (the shipped example installs literal HashiCorp Vault — package name, systemd service, `/etc/vault.d/`, the `vault` CLI — none of which is the `baseline_image_*` convention and none of which should ever be touched by this rename). This is also why the shipped example's playbook is named `deploy_vault.yml`, not `deploy_baseline_image.yml`: it names the actual software it installs, not the directory's organizational label. Rename the file itself, then write its contents for the new service from scratch. Every other tracked file has `baseline_image`/`baseline_image_*` references that must be replaced with the new service's name before use.
+`ansible.cfg` is the only tracked file with no service-specific content — copy it unchanged. `deploy_<service>.yml` is excluded from the bulk rename below on purpose: it's the one file that isn't following the naming-convention pattern at all, and it's genuinely service-specific content — once you replace its contents, it will commonly contain the literal name of the software it installs (see [provisioning/vault/deploy_vault.yml](../provisioning/vault/deploy_vault.yml): package name, systemd service, `/etc/vault.d/`, the `vault` CLI — none of which is the `baseline_image_*` convention and none of which should ever be touched by this rename). Rename the file itself, then write its contents for the new service from scratch. Every other tracked file has `baseline_image`/`baseline_image_*` references that must be replaced with the new service's name before use.
 
 Do this in a local clone of this repository, not directly on the runner: it needs to be committed and pushed to actually take effect (Section 7). Rename the copied directory, then replace every `baseline_image` reference across the remaining tracked files in one pass — the `baseline_image_` prefix (variable and template names) first, then the bare `baseline_image` label (resource label, inventory group, and directory names):
 
@@ -39,7 +39,7 @@ Do this in a local clone of this repository, not directly on the runner: it need
 cd provisioning
 cp -r baseline_image <service>
 cd <service>
-mv deploy_vault.yml deploy_<service>.yml
+mv deploy_baseline_image.yml deploy_<service>.yml
 grep -rl 'baseline_image' -- main.tf inventory.ini.tpl ansible.cfg run.sh terraform.tfvars.example \
   | xargs sed -i 's/baseline_image_/<service>_/g; s/\bbaseline_image\b/<service>/g'
 ```
@@ -56,9 +56,9 @@ No output means every reference was renamed.
 
 ## 2. main.tf: the resource-ordering rule
 
-Read [provisioning/baseline_image/main.tf](../provisioning/baseline_image/main.tf) for the full, current definition. Three points in it apply to every future instance, not just this one:
+Read [provisioning/vault/main.tf](../provisioning/vault/main.tf) for the full, current definition. Three points in it apply to every future instance, not just this one:
 
-**The Pi-hole reservation must be created before the container.** `null_resource.pihole_service_sync` has no `depends_on`, and `proxmox_virtual_environment_container.baseline_image` has `depends_on = [null_resource.pihole_service_sync]`, the reverse of what you'd write if you provisioned the container first. This ordering matters: a container's first DHCP request happens as soon as it starts. If the DHCP/DNS reservation doesn't exist yet, that first lease can be a mismatched address that isn't corrected until the next lease renewal (e.g., on reboot). Creating the reservation first means the container's very first boot already resolves correctly.
+**The Pi-hole reservation must be created before the container.** `null_resource.pihole_service_sync` has no `depends_on`, and `proxmox_virtual_environment_container.vault` has `depends_on = [null_resource.pihole_service_sync]`, the reverse of what you'd write if you provisioned the container first. This ordering matters: a container's first DHCP request happens as soon as it starts. If the DHCP/DNS reservation doesn't exist yet, that first lease can be a mismatched address that isn't corrected until the next lease renewal (e.g., on reboot). Creating the reservation first means the container's very first boot already resolves correctly.
 
 **`protection = true`** blocks accidental destroy or forced replacement through OpenTofu, a safeguard for any instance holding state that can't be trivially recreated (Vault's raft storage, in this example). To make an intentional destructive change, set it to `false` first, apply, then make the change.
 
@@ -78,12 +78,12 @@ grep -rqsi "$MAC" /etc/pve/lxc /etc/pve/qemu-server; do :; done; echo "$MAC"
 On the runner, inside the service directory:
 
 ```bash
-cd /opt/infra/infrastructure/provisioning/baseline_image
+cd /opt/infra/infrastructure/provisioning/vault
 cp terraform.tfvars.example terraform.tfvars
 chmod 600 terraform.tfvars
 ```
 
-Edit `terraform.tfvars` with real values: see [provisioning/baseline_image/terraform.tfvars.example](../provisioning/baseline_image/terraform.tfvars.example) for the full set and what each one needs.
+Edit `terraform.tfvars` with real values: see [provisioning/vault/terraform.tfvars.example](../provisioning/vault/terraform.tfvars.example) for the full set and what each one needs.
 
 **`host_type` must match a section label already defined in the Pi-hole microservice's reservations file exactly** (case-insensitive). Check the valid labels before setting this:
 
@@ -130,7 +130,7 @@ Validate before applying:
 
 The `admin_ssh_key` task uses `ansible.builtin.lineinfile`, part of `ansible-core`, rather than `ansible.posix.authorized_key`: the runner image only installs `ansible-core` (Section 3 of the setup guide), and `ansible.posix` is not a bundled collection.
 
-For the complete worked example, installing HashiCorp Vault, configuring raft storage, initializing and unsealing the cluster, and enabling the KV v2 engine, see [provisioning/baseline_image/deploy_vault.yml](../provisioning/baseline_image/deploy_vault.yml).
+For the complete worked example, installing HashiCorp Vault, configuring raft storage, initializing and unsealing the cluster, and enabling the KV v2 engine, see [provisioning/vault/deploy_vault.yml](../provisioning/vault/deploy_vault.yml).
 
 ## 6. Run the pipeline
 
@@ -202,6 +202,7 @@ Some attributes (notably `user_account.keys`) can't be updated in place and forc
 
 ## 9. Known limitations
 
+- **`provisioning/baseline_image/` is never deployed on its own.** It has no `atlantis.yaml` project entry and no real `terraform.tfvars`; it exists only to be copied (Section 1). Atlantis's `autodiscover` still notices its `.tf` files, so a PR that edits them directly gets a failed plan comment (missing required variables) rather than nothing — expected, not a bug to fix.
 - **No reservation cleanup on destroy.** The Pi-hole microservice has no delete endpoint, so `tofu destroy` removes the container but leaves its MAC/hostname reservation in place. Remove the corresponding line from the reservations file manually if the address needs to be freed.
 - **Package versions are unpinned.** Playbooks that `apt install` a service package (e.g. `vault`) get whatever version is current in the upstream repository at apply time. Pin a version if reproducibility across runs matters.
 - **TLS is disabled** on service listeners configured by this pattern's example playbook (`tls_disable = 1` for Vault). Acceptable for a trusted internal network; terminate TLS in front of the service, or configure it directly, before exposing it more broadly.

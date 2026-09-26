@@ -274,7 +274,7 @@ autodiscover:
   mode: enabled
 
 projects:
-- dir: provisioning/baseline_image
+- dir: provisioning/vault
   workflow: lxc-instance
 
 workflows:
@@ -289,7 +289,7 @@ workflows:
         - run: ansible-playbook deploy_*.yml
 ```
 
-`autodiscover.mode: enabled` (not `auto`) matters here specifically because an explicit `projects:` entry now exists: `auto` mode only autodiscovers when *no* projects are configured at all, so once you add one explicit project (as above), `auto` would stop autodiscovering anything else. `enabled` keeps autodiscovering every other directory unconditionally, while the explicit entry above takes precedence for `provisioning/baseline_image` specifically. **Every new service needs one more entry under `projects:`** naming its own directory (same `workflow: lxc-instance` value works for all of them; the workflow itself doesn't need repeating).
+`autodiscover.mode: enabled` (not `auto`) matters here specifically because an explicit `projects:` entry now exists: `auto` mode only autodiscovers when *no* projects are configured at all, so once you add one explicit project (as above), `auto` would stop autodiscovering anything else. `enabled` keeps autodiscovering every other directory unconditionally, while the explicit entry above takes precedence for `provisioning/vault` specifically. **Every new service needs one more entry under `projects:`** naming its own directory (same `workflow: lxc-instance` value works for all of them; the workflow itself doesn't need repeating).
 
 The `apply` workflow's `run:` step is a plain process invocation, not a `docker run`: `ansible-playbook` is already on `PATH` inside Atlantis's own container (§2), so this needs nothing more than the command itself.
 
@@ -302,8 +302,8 @@ repos:
   allow_custom_workflows: true
   allowed_overrides: [workflow]
   pre_workflow_hooks:
-    - run: cp /atlantis/secrets/baseline_image.tfvars $DIR/provisioning/baseline_image/terraform.tfvars
-      description: Supply terraform.tfvars for provisioning/baseline_image (gitignored, not in the clone)
+    - run: cp /atlantis/secrets/vault.tfvars $DIR/provisioning/vault/terraform.tfvars
+      description: Supply terraform.tfvars for provisioning/vault (gitignored, not in the clone)
 ```
 
 (§7 covers what that `pre_workflow_hooks` entry is for and why it's shaped this way.)
@@ -330,13 +330,13 @@ Atlantis clones this repo into its **own** ephemeral workspace per PR/project (`
 
 ```yaml
 pre_workflow_hooks:
-  - run: cp /atlantis/secrets/baseline_image.tfvars $DIR/provisioning/baseline_image/terraform.tfvars
-    description: Supply terraform.tfvars for provisioning/baseline_image (gitignored, not in the clone)
+  - run: cp /atlantis/secrets/vault.tfvars $DIR/provisioning/vault/terraform.tfvars
+    description: Supply terraform.tfvars for provisioning/vault (gitignored, not in the clone)
 ```
 
-`$DIR` is Atlantis's own environment variable for "the absolute path to the root of the cloned repository" (documented, not guessed), which is why the destination is `$DIR/provisioning/baseline_image/...` rather than a bare relative filename: `pre_workflow_hooks` run once per PR at the repo root, before any specific project's workflow, not inside a project's own directory. **Add one more `run:` line, with its own destination path, per service** as more are added; there's no way to write a single glob-style line that covers every service's tfvars at once, since each one needs a different real file.
+`$DIR` is Atlantis's own environment variable for "the absolute path to the root of the cloned repository" (documented, not guessed), which is why the destination is `$DIR/provisioning/vault/...` rather than a bare relative filename: `pre_workflow_hooks` run once per PR at the repo root, before any specific project's workflow, not inside a project's own directory. **Add one more `run:` line, with its own destination path, per service** as more are added; there's no way to write a single glob-style line that covers every service's tfvars at once, since each one needs a different real file.
 
-The source file itself, `/atlantis/secrets/baseline_image.tfvars`, is a real secrets file placed on the Atlantis host by hand once (`/opt/infra/atlantis-data/secrets/baseline_image.tfvars` on the host, `chown`'d to match Atlantis's non-root UID per the note in §2, `chmod 600`): no different in kind from today's manual setup, just relocated to a place every PR's ephemeral clone can reach. The actual follow-up (tracked separately, not part of this document): move off plaintext `tfvars` entirely, toward `TF_VAR_*` environment variables injected server-side or, longer-term, Vault-issued secrets once Vault itself is stood up. Fitting, since this pipeline is what provisions Vault in the first place.
+The source file itself, `/atlantis/secrets/vault.tfvars`, is a real secrets file placed on the Atlantis host by hand once (`/opt/infra/atlantis-data/secrets/vault.tfvars` on the host, `chown`'d to match Atlantis's non-root UID per the note in §2, `chmod 600`): no different in kind from today's manual setup, just relocated to a place every PR's ephemeral clone can reach. The actual follow-up (tracked separately, not part of this document): move off plaintext `tfvars` entirely, toward `TF_VAR_*` environment variables injected server-side or, longer-term, Vault-issued secrets once Vault itself is stood up. Fitting, since this pipeline is what provisions Vault in the first place.
 
 ## 8. Troubleshooting
 
