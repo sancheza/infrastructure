@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-network_inventory.py
+network_scanner.py
 
 Comprehensive network scanner tool for local networks.
 It performs an ARP scan for fast discovery and uses Nmap for detailed interrogation
@@ -195,7 +195,7 @@ def main():
             "  • Nmap must be installed and accessible in PATH.\n"
             "\n"
             "Example:\n"
-            "  sudo ./network_inventory.py 192.168.1.0/24 --export\n"
+            "  sudo ./network_scanner.py 192.168.1.0/24 --export\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
