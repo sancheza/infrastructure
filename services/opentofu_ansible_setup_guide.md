@@ -48,12 +48,12 @@ mkdir -p /opt/infra
 git clone https://github.com/sancheza/infrastructure.git /opt/infra/infrastructure
 ```
 
-Every provisioning workspace lives under `/opt/infra/infrastructure/services/<service>-provision/` (see [lxc_instance_provisioning_guide.md](lxc_instance_provisioning_guide.md)). Each workspace's `run.sh` wrapper is tracked in the repo and already points at its own workspace path, so no wrapper needs to be hand-written.
+Every provisioning workspace lives under `/opt/infra/infrastructure/provisioning/<service>/` (see [lxc_instance_provisioning_guide.md](lxc_instance_provisioning_guide.md)). Each workspace's `run.sh` wrapper is tracked in the repo and already points at its own workspace path, so no wrapper needs to be hand-written.
 
 `terraform.tfvars` (real credentials) is gitignored and does not come from the clone. For each workspace, create it once on the runner from the tracked `.example` file:
 
 ```bash
-cd /opt/infra/infrastructure/services/vault-provision
+cd /opt/infra/infrastructure/provisioning/baseline_image
 cp terraform.tfvars.example terraform.tfvars
 chmod 600 terraform.tfvars
 # edit terraform.tfvars with real values

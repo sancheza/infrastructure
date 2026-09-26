@@ -4,7 +4,7 @@ set -e
 docker run --rm -i \
   --net=host \
   --entrypoint "" \
-  -v /opt/infra/infrastructure/services/vault-provision:/workspace \
+  -v /opt/infra/infrastructure/provisioning/baseline_image:/workspace \
   -v /root/.ssh:/root/.ssh:ro \
   -v /root/.ssh:/keys:ro \
   -v /opt/infra/tfstate:/tfstate \

@@ -3,5 +3,5 @@ repos:
   allow_custom_workflows: true
   allowed_overrides: [workflow]
   pre_workflow_hooks:
-    - run: cp /atlantis/secrets/vault-provision.tfvars $DIR/services/vault-provision/terraform.tfvars
-      description: Supply terraform.tfvars for vault-provision (gitignored, not in the clone)
+    - run: cp /atlantis/secrets/baseline_image.tfvars $DIR/provisioning/baseline_image/terraform.tfvars
+      description: Supply terraform.tfvars for provisioning/baseline_image (gitignored, not in the clone)

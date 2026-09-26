@@ -21,6 +21,8 @@ terraform {
   # ephemeral per-PR clone -- they'd otherwise never see the same state.
   # /tfstate is mounted from the same host directory in both run.sh and
   # Atlantis's docker-compose.yml, so both read/write the same file.
+  # Filename predates this directory's move to provisioning/baseline_image/;
+  # left as-is to avoid a state migration on the live container.
   backend "local" {
     path = "/tfstate/vault-provision.tfstate"
   }
@@ -43,25 +45,25 @@ variable "ssh_public_key" {
   type = string
 }
 
-variable "vault_admin_ssh_key" {
+variable "baseline_image_admin_ssh_key" {
   type = string
 }
 
-variable "vault_vmid" {
+variable "baseline_image_vmid" {
   type    = number
   default = 133
 }
 
-variable "vault_mac_address" {
+variable "baseline_image_mac_address" {
   type = string
 }
 
-variable "vault_hostname" {
+variable "baseline_image_hostname" {
   type    = string
-  default = "vault"
+  default = "baseline_image"
 }
 
-variable "vault_host_type" {
+variable "baseline_image_host_type" {
   type    = string
   default = "Servers"
 }
@@ -90,17 +92,17 @@ provider "proxmox" {
   insecure  = true
 }
 
-# 1. Provision target Vault LXC container
-resource "proxmox_virtual_environment_container" "vault" {
+# 1. Provision target LXC container
+resource "proxmox_virtual_environment_container" "baseline_image" {
   node_name     = var.pve_node_name
-  vm_id         = var.vault_vmid
+  vm_id         = var.baseline_image_vmid
   unprivileged  = true
   protection    = true
   start_on_boot = true
-  tags          = ["vault", "terraform-managed", "gitops-verified-v3"]
+  tags          = ["baseline_image", "terraform-managed"]
 
   initialization {
-    hostname = var.vault_hostname
+    hostname = var.baseline_image_hostname
 
     ip_config {
       ipv4 {
@@ -116,7 +118,7 @@ resource "proxmox_virtual_environment_container" "vault" {
   network_interface {
     name        = "eth0"
     bridge      = "vmbr0"
-    mac_address = var.vault_mac_address
+    mac_address = var.baseline_image_mac_address
   }
 
   cpu {
@@ -144,20 +146,20 @@ resource "proxmox_virtual_environment_container" "vault" {
 # 2. Register MAC and Hostname via Pi-hole Microservice
 resource "null_resource" "pihole_service_sync" {
   triggers = {
-    mac_address = var.vault_mac_address
-    hostname    = var.vault_hostname
+    mac_address = var.baseline_image_mac_address
+    hostname    = var.baseline_image_hostname
   }
 
   provisioner "local-exec" {
-    command = "curl -fsSL -X POST \"${var.pihole_service_url}\" -H \"Authorization: Bearer ${var.pihole_api_key}\" -H \"Content-Type: application/json\" -d '{\"mac\": \"${var.vault_mac_address}\", \"hostname\": \"${var.vault_hostname}\", \"host_type\": \"${var.vault_host_type}\"}'"
+    command = "curl -fsSL -X POST \"${var.pihole_service_url}\" -H \"Authorization: Bearer ${var.pihole_api_key}\" -H \"Content-Type: application/json\" -d '{\"mac\": \"${var.baseline_image_mac_address}\", \"hostname\": \"${var.baseline_image_hostname}\", \"host_type\": \"${var.baseline_image_host_type}\"}'"
   }
 }
 
 # 3. Dynamic Ansible Inventory Output
 resource "local_file" "ansible_inventory" {
   content = templatefile("${path.module}/inventory.ini.tpl", {
-    vault_hostname      = var.vault_hostname
-    vault_admin_ssh_key = var.vault_admin_ssh_key
+    baseline_image_hostname      = var.baseline_image_hostname
+    baseline_image_admin_ssh_key = var.baseline_image_admin_ssh_key
   })
   filename = "${path.module}/inventory.ini"
 
@@ -165,12 +167,17 @@ resource "local_file" "ansible_inventory" {
 }
 
 output "assigned_mac" {
-  value = var.vault_mac_address
+  value = var.baseline_image_mac_address
 }
 
 output "assigned_host" {
-  value = var.vault_hostname
+  value = var.baseline_image_hostname
 }
 
-# vault-rebuild-test: trigger a real end-to-end create via GitOps,
-# with the shared state backend and tfvars pre_workflow_hook in place.
+# Preserves state continuity for the already-applied container after the
+# vault -> baseline_image resource-label rename; without this, the next
+# plan treats it as a delete-and-recreate instead of a no-op.
+moved {
+  from = proxmox_virtual_environment_container.vault
+  to   = proxmox_virtual_environment_container.baseline_image
+}

@@ -37,9 +37,9 @@ Three more points are worth clarifying:
   * A separate *playbook*, always: `deploy_vault.yml` is Vault-specific by design and could never be shared with another service, since it installs different software.
 
 * **Where does Vault-specific content actually live?**
-  Inside `services/vault-provision/`, the same directory as the generic pattern, distinguished by *content* rather than location:
-  * Generic (the same shape every service's `main.tf` follows): the container resource, the Pi-hole registration, the rendered Ansible inventory, `protection`/`start_on_boot`/`tags`, the dependency ordering that fixes the DHCP timing issue.
-  * Vault-specific: every variable prefixed `vault_`, and the entire contents of `deploy_vault.yml` past its three shared bootstrap tasks (installing the `vault` package, configuring raft storage, running `vault operator init`/`unseal`, enabling the KV v2 engine).
+  Inside `provisioning/baseline_image/`, the same directory as the generic pattern, distinguished by *content* rather than location:
+  * Generic (the same shape every service's `main.tf` follows, using `baseline_image` as this instance's organizational label): the container resource, the Pi-hole registration, the rendered Ansible inventory, every variable prefixed `baseline_image_`, `protection`/`start_on_boot`/`tags`, the dependency ordering that fixes the DHCP timing issue.
+  * Vault-specific: the entire contents of `deploy_vault.yml` past its three shared bootstrap tasks (installing the `vault` package, configuring raft storage, running `vault operator init`/`unseal`, enabling the KV v2 engine). This file keeps Vault's real name rather than following the `baseline_image` label, since it names the actual software it installs (`lxc_instance_provisioning_guide.md` §1 covers why).
 
 	There's no separate "Vault config" file or directory elsewhere; it's all in this one place, which is exactly what makes the directory self-contained and independently deployable.
 
@@ -48,7 +48,7 @@ Three more points are worth clarifying:
 
   ```yaml
   projects:
-  - dir: services/vault-provision
+  - dir: provisioning/baseline_image
     workflow: lxc-instance
   ```
 
@@ -69,11 +69,11 @@ This is what actually happens, in order, when a change to Vault's config goes fr
 
 1. **Runner and Atlantis already running.** One-time infrastructure, covered by [opentofu_ansible_setup_guide.md](opentofu_ansible_setup_guide.md) and [gitops_setup_guide.md](gitops_setup_guide.md). Not repeated per service or per change.
 
-2. **`services/vault-provision/` exists in the repo**, containing the six tracked files from Section 1's table, plus `.terraform.lock.hcl`. All committed. `terraform.tfvars` itself is not (gitignored; see step 6).
+2. **`provisioning/baseline_image/` exists in the repo**, containing the six tracked files from Section 1's table, plus `.terraform.lock.hcl`. All committed. `terraform.tfvars` itself is not (gitignored; see step 6).
 
 3. **Someone edits a tracked file** (`main.tf`, `deploy_vault.yml`, whatever), on a branch, and opens a PR against `main`.
 
-4. **Atlantis receives the event** via `gh webhook forward` (no public endpoint involved, per [gitops_setup_guide.md](gitops_setup_guide.md) §4), matches `services/vault-provision` against its explicit `projects:` entry (Section 1), and runs the `lxc-instance` workflow's `plan` steps: `tofu init` then `tofu plan`, inside a fresh, temporary clone of the repo that Atlantis manages itself, separate from the runner's own long-lived checkout at `/opt/infra/infrastructure`.
+4. **Atlantis receives the event** via `gh webhook forward` (no public endpoint involved, per [gitops_setup_guide.md](gitops_setup_guide.md) §4), matches `provisioning/baseline_image` against its explicit `projects:` entry (Section 1), and runs the `lxc-instance` workflow's `plan` steps: `tofu init` then `tofu plan`, inside a fresh, temporary clone of the repo that Atlantis manages itself, separate from the runner's own long-lived checkout at `/opt/infra/infrastructure`.
 
 5. **Atlantis comments the plan output on the PR.** This is the actual review gate: whoever's watching reads the diff here, not in a terminal.
 
@@ -102,9 +102,9 @@ VAULT_TOKEN=<root-token> vault secrets list   # secret/ present, type kv
 
 The mechanical recipe, using today's actual files as the reference (a dedicated, non-deployed template for this is separate, ongoing work elsewhere in this repo; use whatever exists once it lands, but the recipe itself doesn't change):
 
-1. In a local clone of this repo, `git pull` to get the latest `main`, then copy `services/vault-provision/` to `services/<new-service>-provision/`.
-2. Rename every `vault_*` variable, and the `vault` resource label, to `<new-service>_*` / `<new-service>` (`main.tf`, `inventory.ini.tpl`, `terraform.tfvars.example`, `run.sh`'s mount path). [lxc_instance_provisioning_guide.md](lxc_instance_provisioning_guide.md) has the exact list of what needs renaming and what doesn't (`ansible.cfg` never changes).
-3. Replace `deploy_vault.yml`'s content past the three bootstrap tasks (`wait_for_connection`, gather facts, authorize admin key) with whatever actually installs and configures the new service. Rename the file to `deploy_<new-service>.yml`; the `deploy_*.yml` glob in the shared workflow picks it up automatically.
+1. In a local clone of this repo, `git pull` to get the latest `main`, then copy `provisioning/baseline_image/` to `provisioning/<service>/`.
+2. Rename every `baseline_image_*` variable, and the `baseline_image` resource label, to `<service>_*` / `<service>` (`main.tf`, `inventory.ini.tpl`, `terraform.tfvars.example`, `run.sh`'s mount path). [lxc_instance_provisioning_guide.md](lxc_instance_provisioning_guide.md) has the exact list of what needs renaming and what doesn't (`ansible.cfg` never changes).
+3. Replace `deploy_vault.yml`'s content past the three bootstrap tasks (`wait_for_connection`, gather facts, authorize admin key) with whatever actually installs and configures the new service. Rename the file to `deploy_<service>.yml`; the `deploy_*.yml` glob in the shared workflow picks it up automatically.
 4. **Add one entry to `atlantis.yaml`'s `projects:` list**, naming the new directory and the same shared `workflow: lxc-instance` (Section 1). This is the one piece of Atlantis config every new service actually needs; nothing else there changes.
 5. If this new service writes anything analogous to `vault-cluster-keys.json` (something one PR's run produces that a later PR's run needs to read back), give it its own fixed path under `/secrets`, following the same reasoning as step 9 in Section 2.
 6. Follow Section 2 above from step 3 onward: open a PR, review the plan, apply, verify.
