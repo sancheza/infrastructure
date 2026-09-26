@@ -5,7 +5,7 @@ autodiscover:
   mode: enabled
 
 projects:
-- dir: provisioning/baseline_image
+- dir: provisioning/vault
   workflow: lxc-instance
 
 workflows:

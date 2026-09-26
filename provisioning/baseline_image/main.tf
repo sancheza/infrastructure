@@ -21,10 +21,8 @@ terraform {
   # ephemeral per-PR clone -- they'd otherwise never see the same state.
   # /tfstate is mounted from the same host directory in both run.sh and
   # Atlantis's docker-compose.yml, so both read/write the same file.
-  # Filename predates this directory's move to provisioning/baseline_image/;
-  # left as-is to avoid a state migration on the live container.
   backend "local" {
-    path = "/tfstate/vault-provision.tfstate"
+    path = "/tfstate/baseline_image.tfstate"
   }
 }
 
@@ -50,8 +48,7 @@ variable "baseline_image_admin_ssh_key" {
 }
 
 variable "baseline_image_vmid" {
-  type    = number
-  default = 133
+  type = number
 }
 
 variable "baseline_image_mac_address" {
@@ -172,12 +169,4 @@ output "assigned_mac" {
 
 output "assigned_host" {
   value = var.baseline_image_hostname
-}
-
-# Preserves state continuity for the already-applied container after the
-# vault -> baseline_image resource-label rename; without this, the next
-# plan treats it as a delete-and-recreate instead of a no-op.
-moved {
-  from = proxmox_virtual_environment_container.vault
-  to   = proxmox_virtual_environment_container.baseline_image
 }

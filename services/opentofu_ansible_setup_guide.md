@@ -53,7 +53,7 @@ Every provisioning workspace lives under `/opt/infra/infrastructure/provisioning
 `terraform.tfvars` (real credentials) is gitignored and does not come from the clone. For each workspace, create it once on the runner from the tracked `.example` file:
 
 ```bash
-cd /opt/infra/infrastructure/provisioning/baseline_image
+cd /opt/infra/infrastructure/provisioning/vault
 cp terraform.tfvars.example terraform.tfvars
 chmod 600 terraform.tfvars
 # edit terraform.tfvars with real values
