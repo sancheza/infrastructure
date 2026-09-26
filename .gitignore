@@ -49,6 +49,9 @@ log.txt
 .env.local
 config.ini
 
+# Private, local-only Claude instructions
+/CLAUDE.md
+
 # Ignore GIFs in the root
 /*.gif
 
