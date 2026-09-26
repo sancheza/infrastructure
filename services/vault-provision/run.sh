@@ -8,5 +8,6 @@ docker run --rm -i \
   -v /root/.ssh:/root/.ssh:ro \
   -v /root/.ssh:/keys:ro \
   -v /opt/infra/tfstate:/tfstate \
+  -v /opt/infra/atlantis-data/secrets:/secrets \
   -w /workspace \
   infra-runner:latest "$@"
