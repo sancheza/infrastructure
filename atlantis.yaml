@@ -1,0 +1,16 @@
+version: 3
+automerge: false
+
+autodiscover:
+  mode: auto
+
+workflows:
+  lxc-instance:
+    plan:
+      steps:
+        - init
+        - plan
+    apply:
+      steps:
+        - apply
+        - run: ansible-playbook deploy_*.yml
