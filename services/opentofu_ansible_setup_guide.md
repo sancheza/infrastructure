@@ -39,72 +39,9 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
 apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io
 ```
 
-`git` runs on the LXC host directly (not inside the Docker image built in Section 2) — it manages the checkout that the Docker container mounts as its workspace.
+## 2. Clone the infrastructure repository
 
-## 2. Build the runner Docker image
-
-On the runner LXC, create the build directory and Dockerfile:
-
-```bash
-mkdir -p /opt/infra-runner
-cd /opt/infra-runner
-```
-
-`/opt/infra-runner/Dockerfile`:
-
-```dockerfile
-FROM ghcr.io/opentofu/opentofu:minimal AS tofu-bin
-
-FROM debian:12-slim
-
-# Copy OpenTofu binary
-COPY --from=tofu-bin /usr/local/bin/tofu /usr/local/bin/tofu
-
-# Install Ansible, Python, SSH client, and tools
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    python3-venv \
-    openssh-client \
-    curl \
-    jq \
-    ca-certificates \
-    bash \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Ansible core and hvac
-RUN pip3 install --no-cache-dir --break-system-packages \
-    ansible-core \
-    hvac
-
-WORKDIR /workspace
-ENTRYPOINT ["/bin/bash"]
-```
-
-Build the image:
-
-```bash
-docker build -t infra-runner:latest /opt/infra-runner
-```
-
-`ansible-core` is the only Ansible package installed — no extra collections (e.g. `ansible.posix`). Playbooks in this pipeline stick to `ansible.builtin.*` modules for that reason.
-
-## 3. Generate the orchestration SSH key
-
-On the runner LXC, generate a dedicated SSH key pair. This key is used by OpenTofu (as `ssh_public_key`) and by Ansible to reach every host the runner provisions. It's a machine credential, not a personal one — it's never committed to git and never leaves this host.
-
-```bash
-mkdir -p /root/.ssh
-ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_infra
-```
-
-Display the public key and copy its value for `terraform.tfvars` in each service workspace:
-
-```bash
-cat /root/.ssh/id_infra.pub
-```
-
-## 4. Clone the infrastructure repository
+The runner's Docker image is built from a Dockerfile tracked in this repo (§3), so the clone has to exist before the image can be built.
 
 ```bash
 mkdir -p /opt/infra
@@ -121,6 +58,34 @@ cp terraform.tfvars.example terraform.tfvars
 # edit terraform.tfvars with real values
 ```
 
+## 3. Build the runner Docker image
+
+The Dockerfile lives at [services/runner-image/Dockerfile](runner-image/Dockerfile) in this repo, alongside [services/runner-image/Dockerfile.atlantis](runner-image/Dockerfile.atlantis) (used by [gitops_setup_guide.md](gitops_setup_guide.md)). Build from the clone made in §2:
+
+```bash
+cd /opt/infra/infrastructure
+docker build -t infra-runner:latest -f services/runner-image/Dockerfile services/runner-image
+```
+
+**How this image actually gets used**: every `./run.sh tofu ...` or `./run.sh ansible-playbook ...` invocation (§4 of [lxc_instance_provisioning_guide.md](lxc_instance_provisioning_guide.md)) spawns a fresh, disposable container from this image (`docker run --rm`), runs that one command inside it, then removes the container. The image itself holds no state between runs; each invocation starts clean. This is different from how Atlantis uses its own image (see [gitops_setup_guide.md](gitops_setup_guide.md) §2), where `tofu`/`ansible-playbook` run as plain processes inside one already-running container instead of spawning a new one per command.
+
+`ansible-core` is the only Ansible package installed, no extra collections (e.g. `ansible.posix`). Playbooks in this pipeline stick to `ansible.builtin.*` modules for that reason.
+
+## 4. Generate the orchestration SSH key
+
+On the runner LXC, generate a dedicated SSH key pair. This key is used by OpenTofu (as `ssh_public_key`) and by Ansible to reach every host the runner provisions. It's a machine credential, not a personal one: it's never committed to git and never leaves this host.
+
+```bash
+mkdir -p /root/.ssh
+ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_infra
+```
+
+Display the public key and copy its value for `terraform.tfvars` in each service workspace:
+
+```bash
+cat /root/.ssh/id_infra.pub
+```
+
 ## 5. Keeping the runner in sync
 
 Whenever `services/` files change upstream, update the runner's checkout before the next `apply`:
@@ -130,4 +95,4 @@ cd /opt/infra/infrastructure
 git pull
 ```
 
-`terraform.tfvars` and any `*.tfstate*` files are gitignored, so `git pull` never touches or overwrites them.
+`terraform.tfvars` and any `*.tfstate*` files are gitignored, so `git pull` never touches or overwrites them. If [services/runner-image/Dockerfile](runner-image/Dockerfile) itself changed, rebuild the image (§3's `docker build` command) after pulling; a `git pull` alone doesn't rebuild it.
