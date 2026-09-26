@@ -1,7 +1,0 @@
-repos:
-- id: github.com/sancheza/infrastructure
-  allow_custom_workflows: true
-  allowed_overrides: [workflow]
-  pre_workflow_hooks:
-    - run: cp /atlantis/secrets/vault.tfvars $DIR/provisioning/vault/terraform.tfvars
-      description: Supply terraform.tfvars for provisioning/vault (gitignored, not in the clone)
