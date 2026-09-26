@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - ATLANTIS_DEFAULT_TF_DISTRIBUTION=opentofu
     ports:
       - "127.0.0.1:4141:4141"
     volumes:
