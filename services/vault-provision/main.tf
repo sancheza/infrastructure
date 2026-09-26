@@ -97,7 +97,7 @@ resource "proxmox_virtual_environment_container" "vault" {
   unprivileged  = true
   protection    = true
   start_on_boot = true
-  tags          = ["vault", "terraform-managed"]
+  tags          = ["vault", "terraform-managed", "gitops-verified"]
 
   initialization {
     hostname = var.vault_hostname
