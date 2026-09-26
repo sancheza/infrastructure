@@ -22,7 +22,10 @@ The following immediate findings were remediated directly:
 ## 2. Deep Dive: Content & Organization Best Practices
 
 ### A. Infrastructure as Code (IaC) Template Desynchronization
-The repository contains two service provisioning workspaces under `services/`:
+
+**Resolved (2026-09-26), by a different fix than this section originally recommended:** the two workspaces below no longer exist at these paths. `services/vault-provision/` and the incomplete `services/baseline_image-provision/` copy were split into `provisioning/vault/` (the real, deployed instance, reverted to its original `vault_*` naming) and `provisioning/baseline_image/` (a fresh, generic, undeployed template with a minimal playbook), both moved out of `services/` into a new top-level `provisioning/` directory kept separate from the guides. `atlantis.yaml` and `services/runner-image/repos.yaml` were updated to match. The specific issues below (missing backend, hardcoded SSH path, missing volume mounts, Vault content in a generic playbook, colliding placeholder values) are all fixed as a byproduct of building the new template from scratch rather than patching the old copy. Left in place below for the historical record of what was found.
+
+The repository contained two service provisioning workspaces under `services/`:
 * `services/vault-provision/` (actively maintained, production-tested)
 * `services/baseline_image-provision/` (intended as the generic worked example/template)
 
@@ -119,10 +122,11 @@ infrastructure/
 │   └── monitoring/
 │       ├── tvh_kuma_monitor.sh
 │       └── proxmox_net_check.sh
-├── services/                    # IaC and deployment pipelines
-│   ├── runner-image/            # Runner Dockerfile & Atlantis configuration
-│   ├── baseline_image-provision/
-│   └── vault-provision/
+├── services/                    # Guides only (provisioning pipelines moved out, 2026-09-26)
+│   └── runner-image/            # Runner Dockerfile & Atlantis configuration
+├── provisioning/                 # IaC instances, one directory per service
+│   ├── baseline_image/          # Generic, undeployed template
+│   └── vault/                   # Real, deployed instance
 ├── systemd/                     # Systemd service unit files
 │   ├── macaddr-reservation-service.service
 │   └── tvh-monitor.service
@@ -146,12 +150,10 @@ infrastructure/
 2. **Test Coverage for Core Scripts:**
    * `check_latency.py` has no unit tests for ping output parsing, regex extraction, or statistical aggregation.
    * Shell scripts (`proxmox_net_check.sh`, `check_wifi.sh`, `monitor_smb.sh`, `tvh_kuma_monitor.sh`) have no automated test coverage.
-3. **`atlantis.yaml` Registration for `baseline_image-provision`:**
-   * Currently, only `services/vault-provision` is registered with workflow `lxc-instance`. PRs affecting `baseline_image-provision` fallback to default plan/apply without executing the Ansible configuration playbook.
+3. **`atlantis.yaml` Registration for the generic template:** *(resolved differently, see §2A note)* — the generic template (now `provisioning/baseline_image/`) is deliberately not registered in `atlantis.yaml`: it's a copy-source only, never deployed on its own, so autodiscover's fallback default-workflow behavior doesn't apply to it in practice.
 4. **Dynamic Secret Mapping in Atlantis:**
-   * `services/runner-image/repos.yaml` hardcodes a pre-workflow hook specifically for Vault:
-     `cp /atlantis/secrets/vault-provision.tfvars $DIR/services/vault-provision/terraform.tfvars`.
-   * A generalized convention (e.g. `cp /atlantis/secrets/${PROJECT_NAME}.tfvars $DIR/terraform.tfvars`) is needed for multi-service scaling.
+   * `services/runner-image/repos.yaml` still hardcodes a pre-workflow hook specifically for Vault (now `cp /atlantis/secrets/vault.tfvars $DIR/provisioning/vault/terraform.tfvars`).
+   * A generalized convention (e.g. `cp /atlantis/secrets/${PROJECT_NAME}.tfvars $DIR/terraform.tfvars`) is still needed for multi-service scaling — this part of the finding still stands.
 5. **Tooling Configuration File:**
    * A `pyproject.toml` file defining tool configurations (`pytest`, `ruff`/`flake8`) in a single declarative location.
 
@@ -162,12 +164,7 @@ infrastructure/
 ### Priority 1: High (Correctness, CI/CD & IaC Alignment)
 1. **Enable Pytest in CI:**
    Add `pytest` execution step to `.github/workflows/lint.yml`.
-2. **Bring `services/baseline_image-provision` to Parity:**
-   * Add `backend "local"` block pointing to `/tfstate/baseline_image-provision.tfstate`.
-   * Update `inventory.ini.tpl` to use `/keys/id_infra`.
-   * Update `run.sh` to mount `/tfstate`, `/secrets`, and `/keys`.
-   * Replace Vault-specific steps in `deploy_baseline_image.yml` with generic baseline OS hardening tasks (or document clear placeholder tasks).
-   * Register `services/baseline_image-provision` in `atlantis.yaml`.
+2. ~~**Bring `services/baseline_image-provision` to Parity**~~ — **Done (2026-09-26)**, via `provisioning/baseline_image/` rebuilt from scratch instead of patched (§2A note).
 
 ### Priority 2: Medium (Layout Reorganization & Testing)
 3. **Directory Restructuring:**
