@@ -196,7 +196,10 @@ After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/gh webhook forward --repo sancheza/infrastructure --events pull_request,pull_request_review,issue_comment,push --url http://127.0.0.1:4141/events
+User=root
+Environment=HOME=/root
+EnvironmentFile=/opt/infra/infrastructure/services/runner-image/.env
+ExecStart=/usr/bin/gh webhook forward --repo sancheza/infrastructure --events pull_request,pull_request_review,issue_comment,push --url http://127.0.0.1:4141/events --secret ${ATLANTIS_GH_WEBHOOK_SECRET}
 Restart=always
 RestartSec=5
 
@@ -207,6 +210,10 @@ EOF
 sudo systemctl enable --now atlantis-webhook-forward
 sudo systemctl status atlantis-webhook-forward
 ```
+
+**`--secret ${ATLANTIS_GH_WEBHOOK_SECRET}` is required, not optional.** Without it, `gh webhook forward` creates its GitHub-side webhook with no secret at all, so Atlantis's own signature check (`ATLANTIS_GH_WEBHOOK_SECRET` in `.env`) rejects every event with `missing signature`, including GitHub's automatic `ping` event the moment the webhook is created. `EnvironmentFile=` points at the same `.env` Atlantis itself reads (§3.2), so there's exactly one place this secret is set, not two copies to keep in sync.
+
+**`User=root` and `Environment=HOME=/root` are both required, not optional.** Systemd system units with no explicit `User=` still run as root, but don't export `$HOME` into the process's environment the way an interactive root login shell does. `gh` resolves both its installed extensions (`~/.local/share/gh/extensions/`) and its stored auth token (`~/.config/gh/hosts.yml`, from §4's `gh auth login`) relative to `$HOME`. Without it set explicitly here, the service can't find either, even though both exist exactly where §4 put them. Symptom without this: the unit crash-loops, and `journalctl` shows `gh webhook is available as an official extension. To install it, run: gh extension install cli/gh-webhook`, even though it's already installed.
 
 **Verify** by watching both ends: `journalctl -u atlantis-webhook-forward -f` on the runner, then open (or comment on) a PR against the repo and confirm an event shows up in that log and in `docker logs -f atlantis`.
 
