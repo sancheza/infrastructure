@@ -80,26 +80,55 @@ docker build -t infra-atlantis:latest -f services/runner-image/Dockerfile.atlant
 
 ## 3. Run Atlantis
 
+### 3.1 Create a dedicated GitHub token, not a reused one
+
+Use a token created specifically for Atlantis, not one already in use elsewhere (e.g. the GHCR pull token from `concertfinder`'s own hosting doc). A dedicated token limits blast radius if it ever leaks, can be revoked on its own without disrupting anything else, and (per Atlantis's own documentation) makes it obvious in PR comments that they came from the automation, not from you acting manually.
+
+**Fine-grained, repo-scoped token** (recommended default here): on GitHub, **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**.
+
+- **Repository access**: "Only select repositories" → `sancheza/infrastructure`.
+- **Permissions** (per [Atlantis's own access-credentials docs](https://www.runatlantis.io/docs/access-credentials)):
+  - Contents: **Read-only**
+  - Commit statuses: **Read and write**
+  - Pull requests: **Read and write**
+  - Metadata: read-only (selected automatically)
+
+This is narrower than a classic token's blanket `repo` scope (which grants access to every repo the account can see), so prefer it unless you hit the caveat below.
+
+**Known limitation**: fine-grained tokens have a documented gap with Atlantis's mergeability/branch-protection checks, specifically when `atlantis.yaml` sets `apply_requirements` like `approved` or `undiverged`. The config in §5 doesn't use `apply_requirements` (applies are triggered manually via PR comment instead), so this shouldn't bite here. If you add that gate later and Atlantis starts failing to fetch PR status, switch this token to a classic PAT (`repo` scope) or a GitHub App instead.
+
+**Going further** (optional): Atlantis's own docs recommend a dedicated bot GitHub account (e.g. a second free account named something like `atlantis-bot`) over any token on your personal account, specifically to keep automated PR comments visually distinct from your own. Worth doing if PR-comment clarity matters to you; a repo-scoped token on your existing account (above) is the pragmatic floor for a single-operator setup.
+
+### 3.2 Configure and start it
+
+Atlantis's config lives in [services/runner-image/docker-compose.yml](runner-image/docker-compose.yml) (tracked) and a `.env` file (gitignored, real values, same split as `terraform.tfvars`/`terraform.tfvars.example`). This avoids retyping a long `docker run` command by hand every time the image is rebuilt or a value changes: `--restart unless-stopped` means you run this once at initial setup, but every later change to the image or its config still means recreating the container, which `docker compose up -d` does idempotently from the tracked files instead of a hand-typed command.
+
 ```bash
 mkdir -p /opt/infra/atlantis-data
-
-docker run -d --name atlantis \
-  --restart unless-stopped \
-  -p 127.0.0.1:4141:4141 \
-  -v /opt/infra/atlantis-data:/atlantis \
-  -v /root/.ssh:/root/.ssh:ro \
-  -e ATLANTIS_GH_USER=<your-github-username> \
-  -e ATLANTIS_GH_TOKEN=<a-classic-PAT-with-repo-scope> \
-  -e ATLANTIS_GH_WEBHOOK_SECRET=<a-random-secret-you-generate> \
-  -e ATLANTIS_REPO_ALLOWLIST='github.com/sancheza/infrastructure' \
-  infra-atlantis:latest server
+cd /opt/infra/infrastructure/services/runner-image
+cp .env.example .env
 ```
 
-Remember to replace all three placeholders before running this: `<your-github-username>` (the GitHub account owning `ATLANTIS_GH_TOKEN`), `<a-classic-PAT-with-repo-scope>` (a real classic Personal Access Token, `repo` scope), and `<a-random-secret-you-generate>` (see below).
+Edit `.env` with real values:
 
-Plain bridge networking (no `--net=host`) is enough here: the runner's containers already reach the LAN (Proxmox API, Pi-hole, target hosts) over Docker's normal bridge, confirmed by testing directly rather than assumed. `-p 127.0.0.1:4141:4141` is deliberate: Atlantis is reachable from this host only, never the LAN or internet. `gh webhook forward` (§4) is the only thing that talks to it. `/opt/infra/atlantis-data` is Atlantis's own persistent state (its BoltDB lock/PR database and its per-project ephemeral clones): back this up, or at least know it's there. Losing it loses in-flight PR lock state, not your actual infrastructure.
+```bash
+ATLANTIS_GH_USER=your-github-username
+ATLANTIS_GH_TOKEN=the-fine-grained-token-from-3.1
+ATLANTIS_GH_WEBHOOK_SECRET=generate-with-openssl-rand-hex-32
+ATLANTIS_REPO_ALLOWLIST=github.com/sancheza/infrastructure
+```
 
-Generate `ATLANTIS_GH_WEBHOOK_SECRET` once and keep it: `openssl rand -hex 32` is fine. `ATLANTIS_GH_TOKEN` needs `repo` scope (classic PAT, same reasoning as the GHCR token pattern already used elsewhere in this repo's other docs: fine-grained tokens don't cover everything a classic one does).
+Remember to replace all four values in `.env`: `ATLANTIS_GH_USER` (the GitHub account that owns the token from §3.1, whether your own or a dedicated bot account), `ATLANTIS_GH_TOKEN` (the token itself), and `ATLANTIS_GH_WEBHOOK_SECRET` (generate one with `openssl rand -hex 32` and keep it; `ATLANTIS_REPO_ALLOWLIST` can usually stay as-is).
+
+Then start it:
+
+```bash
+docker compose up -d
+```
+
+**Whenever the image is rebuilt (§2) or `.env`/`docker-compose.yml` changes**, re-run that same `docker compose up -d`: it recreates the container from the current image and config, leaving `/opt/infra/atlantis-data` (Atlantis's own persistent state) untouched, the same update pattern already documented for other Docker-based services in this repo's ecosystem.
+
+Plain bridge networking (no `--net=host`) is enough here: the runner's containers already reach the LAN (Proxmox API, Pi-hole, target hosts) over Docker's normal bridge, confirmed by testing directly rather than assumed. The compose file's `127.0.0.1:4141:4141` port binding is deliberate: Atlantis is reachable from this host only, never the LAN or internet. `gh webhook forward` (§4) is the only thing that talks to it. `/opt/infra/atlantis-data` is Atlantis's own persistent state (its BoltDB lock/PR database and its per-project ephemeral clones): back this up, or at least know it's there. Losing it loses in-flight PR lock state, not your actual infrastructure.
 
 ## 4. Deliver webhooks with `gh webhook forward`, not a public endpoint
 

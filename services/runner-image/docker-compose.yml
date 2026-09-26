@@ -1,0 +1,13 @@
+services:
+  atlantis:
+    image: infra-atlantis:latest
+    container_name: atlantis
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:4141:4141"
+    volumes:
+      - /opt/infra/atlantis-data:/atlantis
+      - /root/.ssh:/root/.ssh:ro
+    command: server
