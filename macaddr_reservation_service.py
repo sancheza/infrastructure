@@ -48,10 +48,11 @@ import traceback
 from datetime import datetime
 from http import HTTPStatus
 
-VERSION = "1.0.2"
+VERSION = "1.1.0"
 
 DEFAULT_RESERVATIONS_FILE = "/root/scripts/macaddr.txt"
 DEFAULT_IMPORTER_PATH = "/root/scripts/pihole_importer.py"
+DEFAULT_LEASES_FILE = "/etc/pihole/dhcp.leases"
 DEFAULT_TOKEN_FILE = "/root/scripts/macaddr_service_token"
 DEFAULT_NETWORK = "192.168.0.0/24"
 DEFAULT_PORT = 8600
@@ -61,7 +62,7 @@ MAX_IMPORTER_OUTPUT = 4000
 IMPORTER_TIMEOUT_SECONDS = 60
 
 SECTION_HEADER_RE = re.compile(
-    r"^#\s*(?P<label>.+?)\s+\.(?P<start>\d{1,3})\s+to\s+\.(?P<end>\d{1,3})\s*$"
+    r"^#\s*(?P<label>.+?)\s+\.(?P<start>\d{1,3})\s+to\s+\.(?P<end>\d{1,3})(?:\s+.*)?$"
 )
 ROW_RE = re.compile(
     r"^(?P<mac>[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}),"
@@ -110,6 +111,7 @@ class ServiceConfig:
     python_bin: str
     network_prefix: str
     token: str
+    leases_file: str = DEFAULT_LEASES_FILE
 
 
 class ReservationError(Exception):
@@ -292,12 +294,123 @@ def find_existing(sections, mac, hostname):
     return None
 
 
-def find_free_ip(section, used_ips, network_prefix):
-    """First unused 4th-octet IP within the section's range, or None."""
+def _normalize_mac(mac):
+    """Normalize MAC address string to uppercase colon-separated format."""
+    clean = re.sub(r"[:\-.]", "", mac).upper()
+    return ":".join(clean[i:i + 2] for i in range(0, 12, 2))
+
+
+def read_active_leases(leases_file):
+    """Read active DHCP leases from dnsmasq/Pi-hole dhcp.leases file.
+
+    Args:
+        leases_file: Path to /etc/pihole/dhcp.leases.
+
+    Returns:
+        dict[str, str]: Mapping of IP address to normalized MAC address.
+        Returns empty dict if file does not exist or cannot be read.
+    """
+    leases = {}
+    if not leases_file or not os.path.exists(leases_file):
+        return leases
+    try:
+        with open(leases_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                # Format: <expiry> <mac> <ip> <hostname> <client_id>
+                if len(parts) >= 3:
+                    mac_part = parts[1]
+                    ip_part = parts[2]
+                    try:
+                        norm_mac = _normalize_mac(mac_part)
+                        leases[ip_part] = norm_mac
+                    except Exception:
+                        continue
+    except OSError:
+        pass
+    return leases
+
+
+def check_arp_neighbor(ip):
+    """Check the OS ARP/neighbor cache for an IP address.
+
+    Args:
+        ip: IPv4 address to inspect.
+
+    Returns:
+        str | None: Normalized MAC address if active neighbor entry exists,
+        or None if no neighbor record or entry is incomplete/failed.
+    """
+    # 1. On Linux, check /proc/net/arp
+    if os.path.exists("/proc/net/arp"):
+        try:
+            with open("/proc/net/arp", "r", encoding="utf-8") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[0] == ip:
+                        hw_addr = parts[3]
+                        if hw_addr and hw_addr != "00:00:00:00:00:00":
+                            return _normalize_mac(hw_addr)
+        except OSError:
+            pass
+
+    # 2. Check via 'ip neigh' or 'arp' command
+    try:
+        cmd = ["ip", "neigh", "show", ip] if shutil.which("ip") else ["arp", "-n", ip]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=2, check=False)
+        output = res.stdout.strip()
+        if output and "FAILED" not in output and "INCOMPLETE" not in output:
+            mac_match = re.search(r"([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})", output)
+            if mac_match:
+                return _normalize_mac(mac_match.group(0))
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    return None
+
+
+def find_free_ip(
+    section,
+    used_ips,
+    network_prefix,
+    target_mac=None,
+    leases_map=None,
+    check_arp=False,
+):
+    """First unused 4th-octet IP within the section's range, or None.
+
+    Considers an IP unavailable if:
+    - Present in used_ips (from reservations file)
+    - Present in leases_map with a MAC different from target_mac
+    - Present in the live ARP/neighbor cache with a MAC different from target_mac
+
+    Args:
+        section: Section object containing start and end octets.
+        used_ips: Set of IP addresses already used in reservations file.
+        network_prefix: IPv4 network prefix (e.g. '192.168.0.').
+        target_mac: Optional normalized MAC address requesting the reservation.
+        leases_map: Optional mapping of {ip: mac} for active DHCP leases.
+        check_arp: If True, probe ARP/neighbor cache for candidates.
+
+    Returns:
+        str | None: First available IP address, or None if section is full.
+    """
+    target_mac_norm = target_mac.upper() if target_mac else None
     for octet in range(section.start, section.end + 1):
         candidate = f"{network_prefix}{octet}"
-        if candidate not in used_ips:
-            return candidate
+        if candidate in used_ips:
+            continue
+        if leases_map and candidate in leases_map:
+            if target_mac_norm is None or leases_map[candidate].upper() != target_mac_norm:
+                continue
+        if check_arp:
+            arp_mac = check_arp_neighbor(candidate)
+            if arp_mac and (target_mac_norm is None or arp_mac.upper() != target_mac_norm):
+                continue
+        return candidate
     return None
 
 
@@ -337,11 +450,6 @@ def insert_line_in_section(lines, section, new_ip, new_line):
 
 
 # ---------- Request handling ----------
-
-def _normalize_mac(mac):
-    clean = re.sub(r"[:\-.]", "", mac).upper()
-    return ":".join(clean[i:i + 2] for i in range(0, 12, 2))
-
 
 def run_importer(config):
     """Run pihole_importer.py against the updated reservations file.
@@ -475,7 +583,15 @@ def process_reservation(payload, config, importer_module):
             )
 
         used_ips = {entry.ip for s in sections for entry in s.entries}
-        ip = find_free_ip(section, used_ips, config.network_prefix)
+        leases_map = read_active_leases(config.leases_file) if config.leases_file else {}
+        ip = find_free_ip(
+            section,
+            used_ips,
+            config.network_prefix,
+            target_mac=mac,
+            leases_map=leases_map,
+            check_arp=not dry_run,
+        )
         if ip is None:
             raise ReservationError(
                 HTTPStatus.SERVICE_UNAVAILABLE,
@@ -726,6 +842,10 @@ def build_parser():
         help=f"Path to macaddr.txt (default: {DEFAULT_RESERVATIONS_FILE})",
     )
     parser.add_argument(
+        "--leases-file", default=DEFAULT_LEASES_FILE,
+        help=f"Path to dhcp.leases (default: {DEFAULT_LEASES_FILE})",
+    )
+    parser.add_argument(
         "--importer-path", default=DEFAULT_IMPORTER_PATH,
         help=f"Path to pihole_importer.py (default: {DEFAULT_IMPORTER_PATH})",
     )
@@ -781,6 +901,7 @@ def main(argv=None):
         python_bin=args.python_bin,
         network_prefix=_network_prefix(args.network),
         token=token,
+        leases_file=args.leases_file,
     )
 
     handler_cls = make_handler(config, pihole_importer)

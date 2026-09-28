@@ -301,6 +301,81 @@ def test_validate_accepts_clean_config():
     pi.validate_toml_integrity(data)  # should not raise
 
 
+# ---------- Active Lease and Log Validation Tests (Layer 3) ----------
+
+def test_check_lease_conflicts_raises_when_ip_leased_to_other_mac(tmp_path):
+    """Import must abort with exit code 2 if candidate IP is leased to another MAC."""
+    leases_file = tmp_path / "dhcp.leases"
+    leases_file.write_text("1790999056 44:d5:cc:70:63:62 192.168.0.26 otherdevice *\n")
+
+    dhcp_hosts = ["BC:24:11:60:19:33,192.168.0.26,test02"]
+
+    with pytest.raises(SystemExit) as exc_info:
+        pi.check_lease_conflicts(dhcp_hosts, leases_path=str(leases_file))
+    assert exc_info.value.code == 2
+
+
+def test_check_lease_conflicts_passes_when_ip_leased_to_same_mac(tmp_path):
+    """Import must succeed if candidate IP is leased to the same MAC (re-reservation)."""
+    leases_file = tmp_path / "dhcp.leases"
+    leases_file.write_text("1790999056 BC:24:11:60:19:33 192.168.0.26 test02 *\n")
+
+    dhcp_hosts = ["BC:24:11:60:19:33,192.168.0.26,test02"]
+    pi.check_lease_conflicts(dhcp_hosts, leases_path=str(leases_file))  # Should not raise
+
+
+def test_check_lease_conflicts_passes_when_no_active_leases(tmp_path):
+    """Import must succeed if dhcp.leases does not exist."""
+    dhcp_hosts = ["BC:24:11:60:19:33,192.168.0.26,test02"]
+    pi.check_lease_conflicts(dhcp_hosts, leases_path=str(tmp_path / "nonexistent.leases"))
+
+
+def test_check_ftl_log_for_warnings_raises_on_collision(tmp_path):
+    """Import must abort with exit code 3 if FTL logs that an address is already leased."""
+    ftl_log = tmp_path / "FTL.log"
+    ftl_log.write_text(
+        "2026-09-27 17:21:30.458 EDT [197056M] WARNING: dnsmasq: "
+        "not using configured address 192.168.0.26 because it is leased to 44:d5:cc:70:63:62\n"
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        pi.check_ftl_log_for_warnings(str(ftl_log), check_ips={"192.168.0.26"})
+    assert exc_info.value.code == 3
+
+
+def test_check_ftl_log_for_warnings_passes_when_clean(tmp_path):
+    """Import must succeed when FTL log contains normal messages with no collision."""
+    ftl_log = tmp_path / "FTL.log"
+    ftl_log.write_text(
+        "2026-09-27 17:21:30.458 EDT [197056M] FTL started successfully\n"
+    )
+    pi.check_ftl_log_for_warnings(str(ftl_log), check_ips={"192.168.0.26"})  # Should not raise
+
+
+def test_check_lease_conflicts_skips_when_flag_enabled(tmp_path):
+    """When skip_conflicts is True, conflicting entries are filtered and no exit occurs."""
+    leases_file = tmp_path / "dhcp.leases"
+    leases_file.write_text("1790999056 44:d5:cc:70:63:62 192.168.0.26 otherdevice *\n")
+
+    dhcp_hosts = [
+        "BC:24:11:60:19:33,192.168.0.26,test02",
+        "BC:24:11:60:19:34,192.168.0.27,cleanhost",
+    ]
+    dns_hosts = [
+        "192.168.0.26 test02.home.lan test02",
+        "192.168.0.27 cleanhost.home.lan cleanhost",
+    ]
+
+    filtered_dhcp, filtered_dns = pi.check_lease_conflicts(
+        dhcp_hosts, dns_hosts=dns_hosts, leases_path=str(leases_file), skip_conflicts=True
+    )
+    assert len(filtered_dhcp) == 1
+    assert "192.168.0.27" in filtered_dhcp[0]
+    assert len(filtered_dns) == 1
+    assert "192.168.0.27" in filtered_dns[0]
+
+
+
 # ---------- Direct invocation (pytest never executes this) ----------
 
 if __name__ == "__main__":

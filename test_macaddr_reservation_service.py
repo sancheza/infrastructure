@@ -390,3 +390,86 @@ def test_end_to_end_http_roundtrip(tmp_path, monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+# ---------- Active Lease and ARP Awareness (Layer 2) ----------
+
+def test_read_active_leases_parses_dnsmasq_format(tmp_path):
+    """Verify read_active_leases correctly parses valid dnsmasq lease files."""
+    leases_file = tmp_path / "dhcp.leases"
+    leases_file.write_text(
+        "1790999056 44:d5:cc:70:63:62 192.168.0.26 test02 01:44:d5:cc:70:63:62\n"
+        "1791059506 2a:aa:0f:19:a9:8b 192.168.0.221 Pixel-10 01:2a:aa:0f:19:a9:8b\n"
+        "# Comment line\n"
+        "\n"
+    )
+    leases = svc.read_active_leases(str(leases_file))
+    assert leases == {
+        "192.168.0.26": "44:D5:CC:70:63:62",
+        "192.168.0.221": "2A:AA:0F:19:A9:8B",
+    }
+
+
+def test_read_active_leases_handles_missing_file():
+    """Verify read_active_leases returns empty dict if file does not exist."""
+    assert svc.read_active_leases("/nonexistent/dhcp.leases") == {}
+
+
+def test_find_free_ip_skips_active_lease_for_different_mac(tmp_path):
+    """Candidate IP present in dhcp.leases for another device must be skipped."""
+    path = _write_sample(tmp_path / "macaddr.txt")
+    lines, _ = svc.read_reservations(str(path))
+    sections = svc.parse_sections(lines)
+    used = {e.ip for s in sections for e in s.entries}
+    servers = svc.find_section(sections, "servers")
+
+    # 192.168.0.3 is the first free IP in macaddr.txt, but leased to a different MAC
+    leases = {"192.168.0.3": "44:D5:CC:70:63:62"}
+    target_mac = "BC:24:11:60:19:33"
+
+    free_ip = svc.find_free_ip(
+        servers, used, "192.168.0.", target_mac=target_mac, leases_map=leases
+    )
+    # Should skip .3 and allocate .4
+    assert free_ip == "192.168.0.4"
+
+
+def test_find_free_ip_allows_active_lease_for_same_mac(tmp_path):
+    """Candidate IP currently leased to the requesting device should be retained."""
+    path = _write_sample(tmp_path / "macaddr.txt")
+    lines, _ = svc.read_reservations(str(path))
+    sections = svc.parse_sections(lines)
+    used = {e.ip for s in sections for e in s.entries}
+    servers = svc.find_section(sections, "servers")
+
+    target_mac = "BC:24:11:60:19:33"
+    leases = {"192.168.0.3": target_mac}
+
+    free_ip = svc.find_free_ip(
+        servers, used, "192.168.0.", target_mac=target_mac, leases_map=leases
+    )
+    # Target MAC already holds the lease on .3, so .3 is acceptable
+    assert free_ip == "192.168.0.3"
+
+
+def test_find_free_ip_skips_arp_neighbor_for_different_mac(tmp_path, monkeypatch):
+    """Candidate IP responding in ARP cache with different MAC must be skipped."""
+    path = _write_sample(tmp_path / "macaddr.txt")
+    lines, _ = svc.read_reservations(str(path))
+    sections = svc.parse_sections(lines)
+    used = {e.ip for s in sections for e in s.entries}
+    servers = svc.find_section(sections, "servers")
+
+    # Stub check_arp_neighbor to simulate .3 being active with another MAC
+    def _mock_arp(ip):
+        if ip == "192.168.0.3":
+            return "44:D5:CC:70:63:62"
+        return None
+
+    monkeypatch.setattr(svc, "check_arp_neighbor", _mock_arp)
+
+    free_ip = svc.find_free_ip(
+        servers, used, "192.168.0.", target_mac="BC:24:11:60:19:33", check_arp=True
+    )
+    assert free_ip == "192.168.0.4"
+
