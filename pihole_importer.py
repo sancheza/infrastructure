@@ -40,9 +40,11 @@ except ImportError:
 
 # --- Configuration ---
 PIHOLE_TOML_PATH = "/etc/pihole/pihole.toml"
+DHCP_LEASES_PATH = "/etc/pihole/dhcp.leases"
+FTL_LOG_PATH = "/var/log/pihole/FTL.log"
 # define your local DNS domain below
 DOMAIN = "home.lan"
-VERSION = "1.3.0"
+VERSION = "1.5.0"
 
 # Entries already warned about this run, so a raw TOML line parsed more than
 # once internally (e.g. once while building a lookup map, again inside
@@ -787,22 +789,125 @@ def validate_toml_integrity(data):
         raise ValueError(f"Generated TOML failed to round-trip parse: {e}")
 
 
-def update_pihole_toml(dns_hosts, dhcp_hosts):
+def check_lease_conflicts(dhcp_hosts, dns_hosts=None, leases_path=DHCP_LEASES_PATH, skip_conflicts=False):
+    """Verify that none of the dhcp_hosts have an active lease for another MAC.
+
+    Args:
+        dhcp_hosts (list): List of 'MAC,IP,HOSTNAME' strings.
+        dns_hosts (list, optional): List of 'IP FQDN HOSTNAME' strings to filter if skipping.
+        leases_path (str): Path to dhcp.leases file.
+        skip_conflicts (bool): If True, skip conflicting entries with a warning instead of aborting.
+
+    Returns:
+        tuple[list, list]: Filtered (dhcp_hosts, dns_hosts) lists.
+
+    Raises:
+        SystemExit: If an active lease exists for an IP with a different MAC and skip_conflicts is False.
+    """
+    if not os.path.exists(leases_path):
+        return dhcp_hosts, dns_hosts
+
+    active_leases = {}
+    try:
+        with open(leases_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 3:
+                    raw_mac = parts[1].replace("-", ":").replace(".", ":").upper()
+                    lease_ip = parts[2]
+                    active_leases[lease_ip] = raw_mac
+    except OSError as e:
+        print(f"⚠️  Warning: Could not read {leases_path}: {e}")
+        return dhcp_hosts, dns_hosts
+
+    conflicts = []
+    conflict_ips = set()
+    for entry in dhcp_hosts:
+        mac, ip, hostname = parse_dhcp_entry(entry)
+        if not ip or not mac:
+            continue
+        norm_mac = mac.replace("-", ":").replace(".", ":").upper()
+        if ip in active_leases and active_leases[ip] != norm_mac:
+            conflicts.append((ip, hostname, norm_mac, active_leases[ip]))
+            conflict_ips.add(ip)
+
+    if conflicts:
+        if skip_conflicts:
+            for ip, hostname, norm_mac, leased_mac in conflicts:
+                print(
+                    f"⚠️  Warning: Skipping reservation for {hostname} ({ip} / {norm_mac}): "
+                    f"currently leased to MAC {leased_mac} in {leases_path}."
+                )
+            filtered_dhcp = [h for h in dhcp_hosts if parse_dhcp_entry(h)[1] not in conflict_ips]
+            filtered_dns = [d for d in dns_hosts if parse_dns_entry(d)[0] not in conflict_ips] if dns_hosts else dns_hosts
+            return filtered_dhcp, filtered_dns
+
+        for ip, hostname, norm_mac, leased_mac in conflicts:
+            print(
+                f"Error: Cannot reserve IP {ip} for {hostname} (MAC {norm_mac}) "
+                f"because {ip} is currently leased to MAC {leased_mac} in {leases_path}.",
+                file=sys.stderr,
+            )
+        print("Hint: Pass --skip-conflicts to import remaining non-conflicting entries.", file=sys.stderr)
+        sys.exit(2)
+
+    return dhcp_hosts, dns_hosts
+
+
+def check_ftl_log_for_warnings(ftl_log_path=FTL_LOG_PATH, check_ips=None, skip_conflicts=False):
+    """Check FTL log for address collision warnings after reload.
+
+    Args:
+        ftl_log_path (str): Path to /var/log/pihole/FTL.log.
+        check_ips (collection): Collection of IP strings to check for warnings.
+        skip_conflicts (bool): If True, log a warning instead of aborting.
+
+    Raises:
+        SystemExit: If dnsmasq logged a warning refusing to use a configured address and skip_conflicts is False.
+    """
+    if not os.path.exists(ftl_log_path) or not check_ips:
+        return
+
+    try:
+        with open(ftl_log_path, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()[-100:]
+        for line in lines:
+            if "not using configured address" in line:
+                for ip in check_ips:
+                    if ip in line:
+                        if skip_conflicts:
+                            print(
+                                f"⚠️  Warning: Pi-hole FTL reported collision for {ip}: {line.strip()}"
+                            )
+                        else:
+                            print(
+                                f"Error: Pi-hole FTL rejected configured address {ip}: {line.strip()}",
+                                file=sys.stderr,
+                            )
+                            sys.exit(3)
+    except OSError as e:
+        print(f"⚠️  Warning: Could not read {ftl_log_path}: {e}")
+
+
+def update_pihole_toml(dns_hosts, dhcp_hosts, skip_conflicts=False):
     """
     Update Pi-hole TOML configuration with new DNS and DHCP entries.
     
     Args:
         dns_hosts (list): List of DNS entries in format "IP FQDN HOSTNAME"
         dhcp_hosts (list): List of DHCP entries in format "MAC,IP,HOSTNAME"
+        skip_conflicts (bool): If True, skip reservations conflicting with active leases
         
     Process:
-        1. Loads existing configuration
-        2. Checks for conflicts with existing entries
-        3. Prompts user for conflict resolution
-        4. Updates configuration
-        5. Creates backup
-        6. Writes updated configuration
-        7. Restarts Pi-hole FTL service
+        1. Pre-checks for active DHCP lease conflicts
+        2. Loads existing configuration
+        3. Checks for conflicts with existing entries
+        4. Prompts user for conflict resolution
+        5. Updates configuration
+        6. Creates backup
+        7. Writes updated configuration
+        8. Restarts Pi-hole FTL service
+        9. Post-checks FTL log for address collision warnings
 
     Existing dns.hosts / dhcp.hosts entries not present in dns_hosts /
     dhcp_hosts are preserved as-is unless they conflict with one of the
@@ -819,6 +924,14 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
     Raises:
         SystemExit: If there are errors reading/writing TOML or restarting service
     """
+    # Pre-check active lease conflicts
+    dhcp_hosts, dns_hosts = check_lease_conflicts(
+        dhcp_hosts, dns_hosts=dns_hosts, leases_path=DHCP_LEASES_PATH, skip_conflicts=skip_conflicts
+    )
+    if not dhcp_hosts and not dns_hosts:
+        print("⚠️  No reservations to import after skipping conflicts.")
+        return
+
     try:
         with open(PIHOLE_TOML_PATH, "r") as f:
             data = toml.load(f)
@@ -1149,6 +1262,10 @@ def update_pihole_toml(dns_hosts, dhcp_hosts):
     except FileNotFoundError:
         print("⚠️  Could not run systemctl. Is this a systemd system?")
 
+    # Post-check: scan FTL log for address collision warnings
+    imported_ips = {parse_dhcp_entry(h)[1] for h in dhcp_hosts if parse_dhcp_entry(h)[1]}
+    check_ftl_log_for_warnings(FTL_LOG_PATH, imported_ips, skip_conflicts=skip_conflicts)
+
 
 # ---------- Main ----------
 
@@ -1163,7 +1280,7 @@ def main():
             "  updates your Pi-hole configuration.\n"
             "\n"
             "USAGE:\n"
-            "  pihole_importer.py [reservations.csv]\n"
+            "  pihole_importer.py [reservations.csv] [--skip-conflicts]\n"
             "\n"
             "  If no input file is specified, defaults to 'macaddr.txt'\n"
             "\n"
@@ -1221,6 +1338,12 @@ def main():
     )
 
     parser.add_argument(
+        "--skip-conflicts",
+        action="store_true",
+        help="Skip reservations that conflict with active DHCP leases instead of aborting",
+    )
+
+    parser.add_argument(
         "--export",
         action="store_true",
         help="Export existing Pi-hole entries to macaddr.[timestamp].csv file",
@@ -1240,7 +1363,7 @@ def main():
         audit_entries(args.input_file)
     else:
         dns_hosts, dhcp_hosts = parse_reservations(args.input_file)
-        update_pihole_toml(dns_hosts, dhcp_hosts)
+        update_pihole_toml(dns_hosts, dhcp_hosts, skip_conflicts=args.skip_conflicts)
 
 
 if __name__ == "__main__":
