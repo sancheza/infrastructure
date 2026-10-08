@@ -1,0 +1,11 @@
+# systemd timer: daily at 03:15 local time; runs after boot if a run was missed
+[Unit]
+Description=Daily hosted app backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

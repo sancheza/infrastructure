@@ -1,0 +1,10 @@
+# systemd service: daily backup of every app with a /opt/<app>/backup.toml
+[Unit]
+Description=Hosted app backup (restic)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hosted-backup run
+User=root

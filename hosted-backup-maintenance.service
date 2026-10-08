@@ -1,0 +1,11 @@
+# systemd service: apply retention and check repository integrity
+[Unit]
+Description=Hosted app backup maintenance (prune and check)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hosted-backup prune
+ExecStart=/usr/local/bin/hosted-backup check --read-data-subset 5%
+User=root

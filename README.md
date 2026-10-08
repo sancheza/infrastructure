@@ -15,6 +15,7 @@ A collection of scripts and tools designed for network administration, performan
 | Infrastructure Configuration  | **[pihole_importer.py](#pi-hole-v6-reservation-importer)** | Pi-hole             | Python     | Bulk importer for static DHCP/DNS into Pi-hole v6.               |
 | Infrastructure Configuration  | **[macaddr_reservation_service.py](#macaddr-reservation-service)** | Pi-hole     | Python     | Authenticated HTTP service that adds host reservations.          |
 | Service Alerting & Monitoring | **[tvh_kuma_monitor.sh](#tvheadend--uptime-kuma-monitor)** | Linux (systemd)     | Bash       | Watches Tvheadend logs and pushes up/down status to Uptime Kuma. |
+| Backup                        | **[hosted_backup.py](#hosted-app-backup)**                 | Linux (systemd)     | Python     | Backs up hosted apps to restic repositories from per-app manifests. |
 
 ---
 
@@ -164,6 +165,31 @@ Why it's useful: Tvheadend can fail quietly (a tuner drops, a muxer crashes) wit
      sudo systemctl enable --now tvh-monitor.service
      ```
   4. Check status/logs with `systemctl status tvh-monitor` / `journalctl -u tvh-monitor -f`.
+
+### Backup
+
+#### Hosted App Backup
+**Files:** `hosted_backup.py`, `hosted-backup.service`, `hosted-backup.timer`, `hosted-backup-maintenance.service`, `hosted-backup-maintenance.timer`
+
+What it does: backs up every hosted app on a host to its own restic repository (S3 or a mounted path), driven by `/opt/<app>/backup.toml`. For each SQLite database it takes an online copy, empties the tables the manifest lists as re-creatable, vacuums and integrity-checks the copy, and stages it with the listed files under a fixed path before the restic backup. Retention is 7 daily and 4 weekly snapshots. One run holds a lock, so two runs never overlap. Standard library only; needs the `restic` package. Specified in `~/dev/docs/hosting-standard.md` section 9. Full guide: [`docs/hosted_backup.rst`](docs/hosted_backup.rst); `hosted-backup --help` covers everyday use.
+
+| Command | Purpose |
+|---|---|
+| `run [app] [-n]` | Back up one app, or every app with a manifest. `-n` reports what would be backed up and creates nothing. |
+| `list <app>` | List snapshots. |
+| `restore <app> --snapshot latest --target <dir>` | Restore into an empty scratch directory outside the app directory. |
+| `check [app] [--read-data-subset 5%]` | Check repository integrity. |
+| `prune [app] [-n]` | Apply retention and remove unreferenced data. |
+
+- **Credentials:** `/etc/hosted-backup/backup.env`, mode 600 (the tool refuses a looser mode): `S3_ENDPOINT`, `S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `RESTIC_PASSWORD`. For a mounted repository use `REPO_BASE` (and `REQUIRE_MOUNT`) instead of the S3 keys.
+- **Install:** `scp hosted_backup.py root@<host>:/usr/local/bin/hosted-backup`, `chmod 755` it, copy the four units to `/etc/systemd/system`, then `systemctl enable --now hosted-backup.timer hosted-backup-maintenance.timer`. The daily timer runs at 03:15 local time; the maintenance timer (prune and a 5% integrity check) runs Sunday 04:30.
+- **Usage:**
+  ```bash
+  hosted-backup run --dry-run
+  hosted-backup run ticketsniper
+  hosted-backup restore ticketsniper --snapshot latest --target /tmp/restore-test
+  ```
+- **Tests:** `pytest test_hosted_backup.py` (a fake `restic` records the calls; no network).
 
 ---
 
