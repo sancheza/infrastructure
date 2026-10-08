@@ -44,6 +44,14 @@ Service Alerting & Monitoring
 
    tvh_kuma_monitor
 
+Backup
+--------
+
+.. toctree::
+   :maxdepth: 1
+
+   hosted_backup
+
 Indices and tables
 =====================
 

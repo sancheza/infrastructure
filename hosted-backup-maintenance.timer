@@ -1,0 +1,11 @@
+# systemd timer: weekly, Sunday 04:30 local time
+[Unit]
+Description=Weekly hosted app backup maintenance
+
+[Timer]
+OnCalendar=Sun *-*-* 04:30:00
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
