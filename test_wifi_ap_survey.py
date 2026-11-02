@@ -88,6 +88,26 @@ def test_fingerprint_ap_detection():
         assert was.fingerprint_ap("192.168.1.3") == "verizon"
 
 
+def test_fingerprint_unifi_vs_generic_404():
+    """Verify UniFi fingerprinting matches authentic controller responses and ignores generic 404s (e.g. Chromecast)."""
+    import urllib.error
+
+    # Case 1: Real UniFi controller returns JSON error on port 8443
+    err_body = b'{"data":[],"meta":{"rc":"error","msg":"api.err.LoginRequired"}}'
+    http_err = urllib.error.HTTPError("https://192.168.1.10:8443/api/login", 400, "Bad Request", {"Set-Cookie": "unificookie=123"}, None)
+    http_err.read = MagicMock(return_value=err_body)
+
+    with patch("urllib.request.urlopen", side_effect=http_err):
+        assert was.fingerprint_ap("192.168.1.10") == "unifi"
+
+    # Case 2: Generic 404 device on port 8443 (e.g. Google Chromecast Cast TLS service)
+    chromecast_err = urllib.error.HTTPError("https://192.168.1.63:8443/api/login", 404, "Not Found", {}, None)
+    chromecast_err.read = MagicMock(return_value=b"")
+
+    with patch("urllib.request.urlopen", side_effect=chromecast_err):
+        assert was.fingerprint_ap("192.168.1.63") is None
+
+
 def test_asus_collector_parsing():
     """Verify AsusCollector parsing of ARP and driver dmesg station lines."""
     fake_output = (
