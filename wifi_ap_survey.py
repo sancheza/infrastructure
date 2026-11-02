@@ -426,8 +426,22 @@ class VerizonCollector(BaseAPCollector):
                             flag = err_data.get("flag")
                             if flag == 1:
                                 last_err_note = "Authentication failed: invalid password"
+                            elif flag == 2:
+                                max_sess = err_data.get("maxsession", 10)
+                                last_err_note = (
+                                    f"Authentication failed: maximum open sessions ({max_sess}) reached on router. "
+                                    "Wait for idle sessions to expire or log out active browser sessions"
+                                )
+                                break
+                            elif flag == 3:
+                                last_err_note = "Authentication failed: session timed out"
                             elif flag == 7:
-                                last_err_note = "Authentication failed: temporarily locked (too many attempts)"
+                                timeout = err_data.get("timeout", 0)
+                                last_err_note = f"Authentication failed: temporarily locked ({timeout}s remaining) due to failed attempts"
+                                break
+                            elif flag == -1:
+                                timeout = err_data.get("timeout", 0)
+                                last_err_note = f"Authentication failed: login disabled for {timeout}s"
                                 break
                             else:
                                 last_err_note = f"Authentication failed: error flag {flag}"
@@ -492,11 +506,18 @@ class VerizonCollector(BaseAPCollector):
                 except Exception as e:
                     log_warn(f"Failed parsing get_wlan_stat_info: {e}")
 
-            # Step 4: Polite logout
+            # Step 4: Polite logout to destroy server session and avoid session slot exhaustion
             try:
+                session_form_token = ""
+                try:
+                    with opener.open(f"https://{self.ip}/loginStatus.cgi", timeout=2) as s_resp:
+                        session_form_token = json.loads(s_resp.read().decode()).get("token", "")
+                except Exception:
+                    pass
+                logout_data = urllib.parse.urlencode({"token": session_form_token}).encode("utf-8")
                 logout_req = urllib.request.Request(
                     f"https://{self.ip}/logout.cgi",
-                    data=b"",
+                    data=logout_data,
                     headers={"Content-Type": "application/x-www-form-urlencoded"}
                 )
                 opener.open(logout_req, timeout=3)

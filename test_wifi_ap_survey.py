@@ -199,6 +199,39 @@ def test_verizon_collector_arcmd5_and_parsing():
         assert clients[1]["band"] == "6 GHz"
 
 
+def test_verizon_collector_flag2_max_sessions():
+    """Verify VerizonCollector provides clear diagnostic when router returns flag 2 (max sessions)."""
+    import urllib.error
+
+    with patch("urllib.request.build_opener") as mock_opener:
+        mock_inst = MagicMock()
+        login_status_cm = MagicMock()
+        login_status_resp = MagicMock()
+        login_status_resp.read.return_value = b'{"loginToken": "tok123"}'
+        login_status_cm.__enter__.return_value = login_status_resp
+
+        flag2_err = urllib.error.HTTPError(
+            "https://192.168.1.1/login.cgi",
+            403,
+            "Forbidden",
+            {},
+            None
+        )
+        flag2_err.read = MagicMock(return_value=b'{"flag": 2, "maxsession": 10, "timeout": 0}')
+
+        mock_inst.open.side_effect = [
+            login_status_cm,
+            flag2_err
+        ]
+        mock_opener.return_value = mock_inst
+
+        collector = was.VerizonCollector("192.168.1.1", password="secret")
+        res = collector.collect()
+        assert len(res) == 1
+        assert res[0]["mac"] == "AUTH_FAILED"
+        assert "maximum open sessions (10) reached" in res[0]["note"]
+
+
 def test_unifi_collector_parsing():
     """Verify UniFiCollector parsing of stat/sta response."""
     sta_json = {
