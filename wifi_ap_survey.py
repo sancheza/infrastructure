@@ -129,7 +129,7 @@ def load_network_inventory(inventory_file: str) -> Tuple[Dict[str, Tuple[str, st
     """
     mac_map: Dict[str, Tuple[str, str]] = {}
     ip_map: Dict[str, str] = {}
-    if not os.path.isfile(inventory_file):
+    if not inventory_file or not os.path.isfile(inventory_file):
         return mac_map, ip_map
 
     try:
@@ -1232,28 +1232,73 @@ Examples:
         print(json.dumps(all_records, indent=2))
         return 0
 
-    # Print Table Format
-    print(f"\n{COLOR_BOLD}{'CONNECTED AP':<24} {'DEVICE NAME':<20} {'IP ADDRESS':<16} {'MAC ADDRESS':<18} {'BAND':<14} {'RSSI':<10} {'LINK RATE':<10}{COLOR_RESET}")
-    print("-" * 114)
-
+    # Format and measure rows for precise, responsive column alignment
+    rows: List[Dict[str, Any]] = []
     for rec in all_records:
-        if rec.get("mac") in ("AUTH_REQUIRED", "AUTH_FAILED"):
+        mac = rec.get("mac", "")
+        if mac in ("AUTH_REQUIRED", "AUTH_FAILED"):
+            tag = "[AUTH FAILED]" if mac == "AUTH_FAILED" else "[AUTH REQUIRED]"
             ap_label = f"{rec.get('ap_type')} ({rec.get('ap_ip')})"
-            tag = "[AUTH FAILED]" if rec.get("mac") == "AUTH_FAILED" else "[AUTH REQUIRED]"
-            print(f"{ap_label:<24} {COLOR_WARN}{tag:<20}{COLOR_RESET} {rec.get('ip'):<16} {'--':<18} {'--':<14} {'--':<10} {rec.get('note', ''):<10}")
+            rows.append({
+                "ap": ap_label,
+                "name": tag,
+                "ip": str(rec.get("ip", "--")),
+                "mac": "--",
+                "band": "--",
+                "rssi": "--",
+                "rate": str(rec.get("note", "")),
+                "is_auth_error": True,
+                "ap_ip": rec.get("ap_ip", ""),
+            })
             continue
 
-        ap_label = f"{rec.get('ap_type', '').replace('RT-AX1800S', '').strip()} ({rec.get('ap_ip')})"
-        dev_name = str(rec.get("device_name", "Unknown"))[:19]
-        ip = str(rec.get("ip", "Unknown"))
-        mac = str(rec.get("mac", "Unknown"))
-        band = str(rec.get("band", "Unknown"))
-        rssi = str(rec.get("rssi", "N/A"))
-        rate = str(rec.get("rate", "N/A"))
+        raw_type = rec.get("ap_type", "").replace("RT-AX1800S", "").strip()
+        ap_label = f"{raw_type} ({rec.get('ap_ip')})"
+        rows.append({
+            "ap": ap_label,
+            "name": str(rec.get("device_name", "Unknown")),
+            "ip": str(rec.get("ip", "Unknown")),
+            "mac": str(rec.get("mac", "Unknown")),
+            "band": str(rec.get("band", "Unknown")),
+            "rssi": str(rec.get("rssi", "N/A")),
+            "rate": str(rec.get("rate", "N/A")),
+            "is_auth_error": False,
+            "ap_ip": rec.get("ap_ip", ""),
+        })
 
-        print(f"{ap_label:<24} {dev_name:<20} {ip:<16} {mac:<18} {band:<14} {rssi:<10} {rate:<10}")
+    w_ap = max(len("ACCESS POINT"), max((len(r["ap"]) for r in rows), default=12))
+    w_name = max(len("DEVICE NAME"), max((len(r["name"]) for r in rows), default=11))
+    w_ip = max(len("IP ADDRESS"), max((len(r["ip"]) for r in rows), default=10))
+    w_mac = max(len("MAC ADDRESS"), max((len(r["mac"]) for r in rows), default=11))
+    w_band = max(len("BAND"), max((len(r["band"]) for r in rows), default=4))
+    w_rssi = max(len("RSSI"), max((len(r["rssi"]) for r in rows), default=4))
+    w_rate = max(len("LINK RATE"), max((len(r["rate"]) for r in rows if not r["is_auth_error"]), default=9))
 
-    print("")
+    hdr = f"{'ACCESS POINT':<{w_ap}}  {'DEVICE NAME':<{w_name}}  {'IP ADDRESS':<{w_ip}}  {'MAC ADDRESS':<{w_mac}}  {'BAND':<{w_band}}  {'RSSI':>{w_rssi}}  {'LINK RATE':>{w_rate}}"
+    div = f"{'=' * w_ap}  {'=' * w_name}  {'=' * w_ip}  {'=' * w_mac}  {'=' * w_band}  {'=' * w_rssi}  {'=' * w_rate}"
+    sep = f"{'-' * w_ap}  {'-' * w_name}  {'-' * w_ip}  {'-' * w_mac}  {'-' * w_band}  {'-' * w_rssi}  {'-' * w_rate}"
+
+    print(f"\n{COLOR_BOLD}{hdr}{COLOR_RESET}")
+    print(div)
+
+    prev_ap_ip = None
+    for r in rows:
+        if prev_ap_ip is not None and r["ap_ip"] != prev_ap_ip:
+            print(sep)
+        prev_ap_ip = r["ap_ip"]
+
+        if r["is_auth_error"]:
+            print(f"{r['ap']:<{w_ap}}  {COLOR_WARN}{r['name']:<{w_name}}{COLOR_RESET}  {r['ip']:<{w_ip}}  {r['mac']:<{w_mac}}  {r['band']:<{w_band}}  {r['rssi']:>{w_rssi}}  {r['rate']}")
+        else:
+            print(f"{r['ap']:<{w_ap}}  {r['name']:<{w_name}}  {r['ip']:<{w_ip}}  {r['mac']:<{w_mac}}  {r['band']:<{w_band}}  {r['rssi']:>{w_rssi}}  {r['rate']:>{w_rate}}")
+
+    print(div)
+
+    valid_clients = [r for r in rows if not r["is_auth_error"]]
+    unique_aps = sorted(set(r["ap_ip"] for r in rows if r["ap_ip"]), key=ip_sort_key)
+    ap_counts = [f"{sum(1 for r in valid_clients if r['ap_ip'] == ap)} on {ap}" for ap in unique_aps]
+    print(f"{COLOR_BOLD}Total:{COLOR_RESET} {len(valid_clients)} active wireless client(s) across {len(unique_aps)} AP(s) ({', '.join(ap_counts)})\n")
+
     return 0
 
 
