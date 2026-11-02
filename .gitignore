@@ -27,6 +27,7 @@ env/
 
 # Data files that shouldn't be version controlled
 *.csv
+!dhcp_reservations.example.csv
 *.json
 *.txt
 !requirements.txt
