@@ -276,7 +276,7 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Output results in JSON format")
     parser.add_argument(
         "--inventory", type=str,
-        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "dhcp_reservations.csv"),
+        default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "dhcp_reservations.csv"),
         help="Path to dhcp_reservations.csv for friendly name mapping"
     )
 
