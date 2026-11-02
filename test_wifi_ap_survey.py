@@ -109,11 +109,15 @@ def test_fingerprint_unifi_vs_generic_404():
 
 
 def test_asus_collector_parsing():
-    """Verify AsusCollector parsing of ARP and driver dmesg station lines."""
+    """Verify AsusCollector parsing of ARP, driver dmesg station lines, and SSIDs."""
     fake_output = (
         "192.168.1.55 0x1 0x2 AA:BB:CC:DD:EE:FF * br0\n"
         "===STATIONS===\n"
         "AA:BB:CC:DD:EE:FF STA 0 0 0 0 0 0 -45/-45 120/120 0 0 80M\n"
+        "11:22:33:44:55:66 STA 0 0 0 0 0 0 -60/-60 54/54 0 0 20M\n"
+        "===SSIDS===\n"
+        "Cooper\n"
+        "Cooper5\n"
         "===CLIENTLIST===\n"
         "{}"
     )
@@ -121,12 +125,16 @@ def test_asus_collector_parsing():
         mock_run.return_value = MagicMock(stdout=fake_output, returncode=0)
         collector = was.AsusCollector("192.168.1.2")
         clients = collector.collect()
-        assert len(clients) == 1
+        assert len(clients) == 2
         assert clients[0]["mac"] == "AA:BB:CC:DD:EE:FF"
         assert clients[0]["ip"] == "192.168.1.55"
         assert clients[0]["rssi"] == "-45 dBm"
         assert clients[0]["rate"] == "120 Mbps"
         assert clients[0]["band"] == "5 GHz"
+        assert clients[0]["ssid"] == "Cooper5"
+        assert clients[1]["mac"] == "11:22:33:44:55:66"
+        assert clients[1]["band"] == "2.4 GHz"
+        assert clients[1]["ssid"] == "Cooper"
 
 
 def test_netgear_collector_parsing():
@@ -180,11 +188,20 @@ def test_verizon_collector_arcmd5_and_parsing():
         dev_resp = MagicMock()
         dev_resp.read.return_value = js_sample.encode("utf-8")
 
+        pri_resp = MagicMock()
+        pri_resp.read.return_value = b'addCfg("wl_ssid24G", 0, "Sullivan"); addCfg("guest_ssid", 0, "Sullivan-Guest");'
+
+        iot_resp = MagicMock()
+        iot_resp.read.return_value = b'addCfg("iot_ssid", 0, "Sullivan-IoT");'
+
         mock_inst.open.return_value.__enter__.side_effect = [
             login_status_resp,
             login_resp,
+            pri_resp,
+            iot_resp,
             dev_resp,
-            MagicMock()  # logout
+            MagicMock(),  # loginStatus (token for logout)
+            MagicMock()   # logout
         ]
         mock_opener.return_value = mock_inst
 
@@ -193,10 +210,12 @@ def test_verizon_collector_arcmd5_and_parsing():
         assert len(clients) == 2
         assert clients[0]["mac"] == "4C:17:44:B0:E4:6C"
         assert clients[0]["band"] == "5 GHz"
+        assert clients[0]["ssid"] == "Sullivan"
         assert clients[0]["rssi"] == "-71 dBm"
         assert clients[0]["rate"] == "520 Mbps"
         assert clients[1]["mac"] == "50:F2:65:DC:2D:2E"
         assert clients[1]["band"] == "6 GHz"
+        assert clients[1]["ssid"] == "Sullivan"
 
 
 def test_verizon_collector_flag2_max_sessions():
@@ -240,6 +259,7 @@ def test_unifi_collector_parsing():
                 "mac": "11:22:33:44:55:66",
                 "ip": "192.168.1.40",
                 "name": "unifi-client",
+                "essid": "Office-WiFi",
                 "is_wired": False,
                 "radio": "na",
                 "channel": 36,
@@ -263,6 +283,7 @@ def test_unifi_collector_parsing():
         assert clients[0]["mac"] == "11:22:33:44:55:66"
         assert clients[0]["band"] == "5 GHz"
         assert clients[0]["rate"] == "866 Mbps"
+        assert clients[0]["ssid"] == "Office-WiFi"
 
 
 def test_openwrt_collector_parsing():
@@ -317,6 +338,7 @@ def test_tplink_collector_parsing():
                     "mac": "66:77:88:99:AA:BB",
                     "ip": "192.168.1.150",
                     "name": "omada-laptop",
+                    "ssid": "Omada-Corp",
                     "wireless": True,
                     "radioId": 1,
                     "rssi": -55,
@@ -342,6 +364,7 @@ def test_tplink_collector_parsing():
         assert clients[0]["band"] == "5 GHz"
         assert clients[0]["rssi"] == "-55 dBm"
         assert clients[0]["rate"] == "866 Mbps"
+        assert clients[0]["ssid"] == "Omada-Corp"
 
 
 def test_ip_sort_key_and_ordering():
@@ -391,6 +414,13 @@ def test_color_styling_and_no_color():
     assert was.COLOR_MAGENTA in was.colorize_band("6 GHz", True)
     assert was.COLOR_CYAN in was.colorize_band("5 GHz", True)
     assert was.COLOR_WARN in was.colorize_band("2.4 GHz (IoT)", True)
+
+    # SSID colors
+    assert was.colorize_ssid("Sullivan-IoT", False) == "Sullivan-IoT"
+    assert was.COLOR_WARN in was.colorize_ssid("Sullivan-IoT", True)
+    assert was.COLOR_MAGENTA in was.colorize_ssid("Sullivan-Guest", True)
+    assert was.COLOR_DIM in was.colorize_ssid("--", True)
+    assert was.COLOR_BOLD in was.colorize_ssid("Sullivan", True)
 
 
 if __name__ == "__main__":

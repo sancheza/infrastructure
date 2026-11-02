@@ -140,6 +140,19 @@ def colorize_band(padded_band: str, use_color: bool) -> str:
     return padded_band
 
 
+def colorize_ssid(padded_ssid: str, use_color: bool) -> str:
+    """Colorizes SSID network names (Amber for IoT, Magenta for Guest, Dim for unknown)."""
+    if not use_color:
+        return padded_ssid
+    if any(k in padded_ssid for k in ("IoT", "iot")):
+        return style_cell(padded_ssid, COLOR_WARN, use_color)
+    elif any(k in padded_ssid for k in ("Guest", "guest", "Restricted", "restricted")):
+        return style_cell(padded_ssid, COLOR_MAGENTA, use_color)
+    elif any(k in padded_ssid for k in ("--", "Unknown", "N/A")):
+        return style_cell(padded_ssid, COLOR_DIM, use_color)
+    return style_cell(padded_ssid, COLOR_BOLD, use_color)
+
+
 def log_info(msg: str) -> None:
     """Print an aligned informational message in green."""
     print(f"{COLOR_INFO}{'INFO':<8}{COLOR_RESET} {msg}")
@@ -275,6 +288,7 @@ class AsusCollector(BaseAPCollector):
                 "iwpriv rai1 show stainfo >/dev/null 2>&1; "
                 "iwpriv ra1 show stainfo >/dev/null 2>&1; "
                 "dmesg | grep -E '[0-9A-Fa-f:]{17}.*STA' | tail -n 35; "
+                "echo '===SSIDS==='; nvram get wl0_ssid; nvram get wl1_ssid; "
                 "echo '===CLIENTLIST==='; cat /tmp/clientlist.json 2>/dev/null"
             )
         ]
@@ -295,10 +309,23 @@ class AsusCollector(BaseAPCollector):
                 if len(parts) >= 4 and ":" in parts[3]:
                     arp_map[parts[3].upper()] = parts[0]
 
-        # 2. Parse driver dmesg output
+        # 2. Parse SSIDs and driver dmesg output
         remaining = sections[1] if len(sections) > 1 else output
-        subsections = remaining.split("===CLIENTLIST===")
-        station_lines = subsections[0].splitlines()
+        ssid_2g = "Unknown"
+        ssid_5g = "Unknown"
+
+        if "===SSIDS===" in remaining:
+            sta_sec, after_sta = remaining.split("===SSIDS===", 1)
+            ssid_sec, _ = after_sta.split("===CLIENTLIST===", 1) if "===CLIENTLIST===" in after_sta else (after_sta, "")
+            ssid_lines = [s.strip() for s in ssid_sec.splitlines() if s.strip()]
+            if len(ssid_lines) >= 1 and ssid_lines[0]:
+                ssid_2g = ssid_lines[0]
+            if len(ssid_lines) >= 2 and ssid_lines[1]:
+                ssid_5g = ssid_lines[1]
+            station_lines = sta_sec.splitlines()
+        else:
+            subsections = remaining.split("===CLIENTLIST===")
+            station_lines = subsections[0].splitlines()
 
         seen_macs = set()
         for line in station_lines:
@@ -315,9 +342,11 @@ class AsusCollector(BaseAPCollector):
                 rssi_val = match.group(2).split("/")[0] + " dBm"
                 rate_val = match.group(3).split("/")[0] + " Mbps"
                 band = "5 GHz" if ("80M" in line or "VHT" in line or "HE" in line) else "2.4 GHz"
+                client_ssid = ssid_5g if band == "5 GHz" else ssid_2g
                 clients.append({
                     "mac": mac,
                     "ip": arp_map.get(mac, "Unknown"),
+                    "ssid": client_ssid,
                     "band": band,
                     "rssi": rssi_val,
                     "rate": rate_val,
@@ -342,6 +371,7 @@ class NetgearCollector(BaseAPCollector):
             return [{
                 "mac": "AUTH_REQUIRED",
                 "ip": self.ip,
+                "ssid": "--",
                 "band": "Unknown",
                 "rssi": "N/A",
                 "rate": "N/A",
@@ -356,6 +386,25 @@ class NetgearCollector(BaseAPCollector):
             authhandler = urllib.request.HTTPBasicAuthHandler(passman)
             cj = http.cookiejar.CookieJar()
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj), authhandler)
+
+            # Query Netgear configured SSIDs
+            netgear_ssids: List[str] = []
+            try:
+                wlg_req = urllib.request.Request(
+                    f"http://{self.ip}/WLG_wireless_dual_band.htm",
+                    headers={"User-Agent": "curl/7.68.0"}
+                )
+                with opener.open(wlg_req, timeout=4) as wresp:
+                    whtml = wresp.read().decode("utf-8", errors="ignore")
+                    m_2g = re.search(r'name=["\']?ssid["\']?\s+value=["\']([^"\']*)["\']', whtml, re.I)
+                    m_5g = re.search(r'name=["\']?ssid_an["\']?\s+value=["\']([^"\']*)["\']', whtml, re.I)
+                    if m_2g and m_2g.group(1):
+                        netgear_ssids.append(m_2g.group(1))
+                    if m_5g and m_5g.group(1) and m_5g.group(1) not in netgear_ssids:
+                        netgear_ssids.append(m_5g.group(1))
+            except Exception:
+                pass
+            client_ssid = " / ".join(netgear_ssids) if netgear_ssids else "Unknown"
 
             req = urllib.request.Request(
                 f"http://{self.ip}/DEV_device.htm",
@@ -376,6 +425,7 @@ class NetgearCollector(BaseAPCollector):
                         "ip": ip,
                         "mac": mac.upper(),
                         "hostname": name_clean,
+                        "ssid": client_ssid,
                         "band": "2.4/5 GHz",
                         "rssi": "N/A",
                         "rate": "N/A",
@@ -388,6 +438,7 @@ class NetgearCollector(BaseAPCollector):
                 return [{
                     "mac": "AUTH_FAILED",
                     "ip": self.ip,
+                    "ssid": "--",
                     "band": "Unknown",
                     "rssi": "N/A",
                     "rate": "N/A",
@@ -428,6 +479,7 @@ class VerizonCollector(BaseAPCollector):
             return [{
                 "mac": "AUTH_REQUIRED",
                 "ip": self.ip,
+                "ssid": "--",
                 "band": "Unknown",
                 "rssi": "N/A",
                 "rate": "N/A",
@@ -525,6 +577,7 @@ class VerizonCollector(BaseAPCollector):
                 return [{
                     "mac": "AUTH_FAILED",
                     "ip": self.ip,
+                    "ssid": "--",
                     "band": "Unknown",
                     "rssi": "N/A",
                     "rate": "N/A",
@@ -533,7 +586,32 @@ class VerizonCollector(BaseAPCollector):
                     "note": last_err_note
                 }]
 
-            # Step 3: Fetch known devices script
+            # Step 3: Fetch configured SSIDs
+            ssid_primary = "Sullivan"
+            ssid_iot = "Sullivan-IoT"
+            ssid_guest = "Sullivan-Guest"
+            try:
+                with opener.open(urllib.request.Request(f"https://{self.ip}/cgi/cgi_wifi_primary.js"), timeout=4) as pri_resp:
+                    pri_js = pri_resp.read().decode("utf-8", errors="ignore")
+                    m_pri = re.search(r'addCfg\s*\(\s*["\']wl_ssid(?:24G|5G|6G)["\']\s*,\s*[^,]+\s*,\s*["\']([^"\']+)["\']', pri_js)
+                    if m_pri:
+                        ssid_primary = m_pri.group(1)
+                    m_gst = re.search(r'addCfg\s*\(\s*["\']guest_ssid["\']\s*,\s*[^,]+\s*,\s*["\']([^"\']+)["\']', pri_js)
+                    if m_gst:
+                        ssid_guest = m_gst.group(1)
+            except Exception:
+                pass
+
+            try:
+                with opener.open(urllib.request.Request(f"https://{self.ip}/cgi/cgi_wifi_iot.js"), timeout=4) as iot_resp:
+                    iot_js = iot_resp.read().decode("utf-8", errors="ignore")
+                    m_iot = re.search(r'addCfg\s*\(\s*["\']iot_ssid["\']\s*,\s*[^,]+\s*,\s*["\']([^"\']+)["\']', iot_js)
+                    if m_iot:
+                        ssid_iot = m_iot.group(1)
+            except Exception:
+                pass
+
+            # Step 4: Fetch known devices script
             dev_req = urllib.request.Request(f"https://{self.ip}/cgi/cgi_known_devices.js")
             with opener.open(dev_req, timeout=5) as resp:
                 dev_js = resp.read().decode("utf-8", errors="ignore")
@@ -551,12 +629,19 @@ class VerizonCollector(BaseAPCollector):
                             mac = mac.upper()
                             if "ath0" in iface:
                                 band = "5 GHz"
+                                client_ssid = ssid_primary
                             elif "ath2" in iface:
                                 band = "6 GHz"
+                                client_ssid = ssid_primary
                             elif "ath12" in iface:
                                 band = "2.4 GHz (IoT)"
+                                client_ssid = ssid_iot
+                            elif "ath11" in iface:
+                                band = "2.4 GHz (Guest)"
+                                client_ssid = ssid_guest
                             else:
                                 band = "2.4 GHz"
+                                client_ssid = ssid_primary
 
                             rssi_str = f"{rssi} dBm" if rssi else "N/A"
                             try:
@@ -567,6 +652,7 @@ class VerizonCollector(BaseAPCollector):
                             clients.append({
                                 "mac": mac,
                                 "ip": "Unknown",
+                                "ssid": client_ssid,
                                 "band": band,
                                 "rssi": rssi_str,
                                 "rate": rate_mbps,
@@ -576,7 +662,7 @@ class VerizonCollector(BaseAPCollector):
                 except Exception as e:
                     log_warn(f"Failed parsing get_wlan_stat_info: {e}")
 
-            # Step 4: Polite logout to destroy server session and avoid session slot exhaustion
+            # Step 5: Polite logout to destroy server session and avoid session slot exhaustion
             try:
                 session_form_token = ""
                 try:
@@ -616,6 +702,7 @@ class UniFiCollector(BaseAPCollector):
             return [{
                 "mac": "AUTH_REQUIRED",
                 "ip": self.ip,
+                "ssid": "--",
                 "band": "Unknown",
                 "rssi": "N/A",
                 "rate": "N/A",
@@ -652,6 +739,7 @@ class UniFiCollector(BaseAPCollector):
             return [{
                 "mac": "AUTH_FAILED",
                 "ip": self.ip,
+                "ssid": "--",
                 "band": "Unknown",
                 "rssi": "N/A",
                 "rate": "N/A",
@@ -677,6 +765,7 @@ class UniFiCollector(BaseAPCollector):
                             "mac": sta.get("mac", "").upper(),
                             "ip": sta.get("ip", "Unknown"),
                             "hostname": sta.get("name") or sta.get("hostname"),
+                            "ssid": sta.get("essid", "Unknown"),
                             "band": band,
                             "rssi": rssi,
                             "rate": rate,
@@ -757,6 +846,7 @@ class OpenWrtCollector(BaseAPCollector):
                     clients.append({
                         "mac": mac,
                         "ip": arp_map.get(mac, "Unknown"),
+                        "ssid": data.get("ssid", "Wi-Fi"),
                         "band": "Wi-Fi",
                         "rssi": f"{signal} dBm" if signal != "N/A" else "N/A",
                         "rate": rate_mbps,
@@ -784,6 +874,7 @@ class MikroTikCollector(BaseAPCollector):
             return [{
                 "mac": "AUTH_REQUIRED",
                 "ip": self.ip,
+                "ssid": "--",
                 "band": "Unknown",
                 "rssi": "N/A",
                 "rate": "N/A",
@@ -812,6 +903,7 @@ class MikroTikCollector(BaseAPCollector):
                     clients.append({
                         "mac": mac,
                         "ip": "Unknown",
+                        "ssid": ent.get("ssid", ent.get("interface", "Wi-Fi")),
                         "band": "Wi-Fi",
                         "rssi": f"{signal} dBm" if signal else "N/A",
                         "rate": tx_rate,
@@ -840,6 +932,7 @@ class TPLinkCollector(BaseAPCollector):
             return [{
                 "mac": "AUTH_REQUIRED",
                 "ip": self.ip,
+                "ssid": "--",
                 "band": "Unknown",
                 "rssi": "N/A",
                 "rate": "N/A",
@@ -879,6 +972,7 @@ class TPLinkCollector(BaseAPCollector):
                         "mac": c.get("mac", "").upper(),
                         "ip": c.get("ip", "Unknown"),
                         "hostname": c.get("name") or c.get("hostName"),
+                        "ssid": c.get("ssid", "Unknown"),
                         "band": band,
                         "rssi": f"{c.get('rssi', 'N/A')} dBm",
                         "rate": f"{c.get('txRate', 'N/A')} Mbps",
@@ -1315,6 +1409,7 @@ Examples:
                 "name": tag,
                 "ip": str(rec.get("ip", "--")),
                 "mac": "--",
+                "ssid": "--",
                 "band": "--",
                 "rssi": "--",
                 "rate": str(rec.get("note", "")),
@@ -1330,6 +1425,7 @@ Examples:
             "name": str(rec.get("device_name", "Unknown")),
             "ip": str(rec.get("ip", "Unknown")),
             "mac": str(rec.get("mac", "Unknown")),
+            "ssid": str(rec.get("ssid", "Unknown")),
             "band": str(rec.get("band", "Unknown")),
             "rssi": str(rec.get("rssi", "N/A")),
             "rate": str(rec.get("rate", "N/A")),
@@ -1341,15 +1437,16 @@ Examples:
     w_name = max(len("DEVICE NAME"), max((len(r["name"]) for r in rows), default=11))
     w_ip = max(len("IP ADDRESS"), max((len(r["ip"]) for r in rows), default=10))
     w_mac = max(len("MAC ADDRESS"), max((len(r["mac"]) for r in rows), default=11))
+    w_ssid = max(len("SSID"), max((len(r["ssid"]) for r in rows), default=4))
     w_band = max(len("BAND"), max((len(r["band"]) for r in rows), default=4))
     w_rssi = max(len("RSSI"), max((len(r["rssi"]) for r in rows), default=4))
     w_rate = max(len("LINK RATE"), max((len(r["rate"]) for r in rows if not r["is_auth_error"]), default=9))
 
     use_color = should_use_color(args.no_color)
 
-    hdr = f"{'ACCESS POINT':<{w_ap}}  {'DEVICE NAME':<{w_name}}  {'IP ADDRESS':<{w_ip}}  {'MAC ADDRESS':<{w_mac}}  {'BAND':<{w_band}}  {'RSSI':>{w_rssi}}  {'LINK RATE':>{w_rate}}"
-    div = f"{'=' * w_ap}  {'=' * w_name}  {'=' * w_ip}  {'=' * w_mac}  {'=' * w_band}  {'=' * w_rssi}  {'=' * w_rate}"
-    sep = f"{'-' * w_ap}  {'-' * w_name}  {'-' * w_ip}  {'-' * w_mac}  {'-' * w_band}  {'-' * w_rssi}  {'-' * w_rate}"
+    hdr = f"{'ACCESS POINT':<{w_ap}}  {'DEVICE NAME':<{w_name}}  {'IP ADDRESS':<{w_ip}}  {'MAC ADDRESS':<{w_mac}}  {'SSID':<{w_ssid}}  {'BAND':<{w_band}}  {'RSSI':>{w_rssi}}  {'LINK RATE':>{w_rate}}"
+    div = f"{'=' * w_ap}  {'=' * w_name}  {'=' * w_ip}  {'=' * w_mac}  {'=' * w_ssid}  {'=' * w_band}  {'=' * w_rssi}  {'=' * w_rate}"
+    sep = f"{'-' * w_ap}  {'-' * w_name}  {'-' * w_ip}  {'-' * w_mac}  {'-' * w_ssid}  {'-' * w_band}  {'-' * w_rssi}  {'-' * w_rate}"
 
     print(f"\n{style_cell(hdr, COLOR_BOLD, use_color)}")
     print(style_cell(div, COLOR_DIM, use_color))
@@ -1366,20 +1463,22 @@ Examples:
             name_cell = style_cell(f"{r['name']:<{w_name}}", COLOR_WARN, use_color)
             ip_cell = f"{r['ip']:<{w_ip}}"
             mac_cell = style_cell(f"{r['mac']:<{w_mac}}", COLOR_DIM, use_color)
+            ssid_cell = style_cell(f"{r['ssid']:<{w_ssid}}", COLOR_DIM, use_color)
             band_cell = style_cell(f"{r['band']:<{w_band}}", COLOR_DIM, use_color)
             rssi_cell = style_cell(f"{r['rssi']:>{w_rssi}}", COLOR_DIM, use_color)
             rate_cell = style_cell(f"{r['rate']}", COLOR_WARN, use_color)
-            print(f"{ap_cell}  {name_cell}  {ip_cell}  {mac_cell}  {band_cell}  {rssi_cell}  {rate_cell}")
+            print(f"{ap_cell}  {name_cell}  {ip_cell}  {mac_cell}  {ssid_cell}  {band_cell}  {rssi_cell}  {rate_cell}")
         else:
             name_color = COLOR_DIM if r["name"] == "Unknown" else COLOR_BOLD
             name_cell = style_cell(f"{r['name']:<{w_name}}", name_color, use_color)
             ip_cell = f"{r['ip']:<{w_ip}}"
             mac_color = COLOR_DIM if r["mac"] == "Unknown" else ""
             mac_cell = style_cell(f"{r['mac']:<{w_mac}}", mac_color, use_color)
+            ssid_cell = colorize_ssid(f"{r['ssid']:<{w_ssid}}", use_color)
             band_cell = colorize_band(f"{r['band']:<{w_band}}", use_color)
             rssi_cell = colorize_rssi(f"{r['rssi']:>{w_rssi}}", use_color)
             rate_cell = colorize_rate(f"{r['rate']:>{w_rate}}", use_color)
-            print(f"{ap_cell}  {name_cell}  {ip_cell}  {mac_cell}  {band_cell}  {rssi_cell}  {rate_cell}")
+            print(f"{ap_cell}  {name_cell}  {ip_cell}  {mac_cell}  {ssid_cell}  {band_cell}  {rssi_cell}  {rate_cell}")
 
     print(style_cell(div, COLOR_DIM, use_color))
 
