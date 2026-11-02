@@ -22,7 +22,6 @@ DEFAULT_APS="192.168.1.2:2,192.168.1.3:3"
 DEFAULT_SSH_USER="admin"
 DEFAULT_SSH_KEY="${HOME}/.ssh/id_ed25519"
 DEFAULT_CRC_THRESHOLD=10
-DEFAULT_PER_THRESHOLD=60
 
 # ADR 0020 Color Palette
 COLOR_RESET="\033[0m"
@@ -64,7 +63,6 @@ OPTIONS:
   -u, --user <USER>         SSH username (Default: $DEFAULT_SSH_USER).
   -i, --identity <KEY>      SSH private key path (Default: auto-detect).
   -c, --crc-threshold <NUM> Maximum allowed cumulative CRC errors (Default: $DEFAULT_CRC_THRESHOLD).
-  -p, --per-threshold <PCT> Maximum allowed Wi-Fi Packet Error Rate % (Default: $DEFAULT_PER_THRESHOLD).
   -n, --dry-run             Run health checks without pushing to Uptime Kuma.
   -V, --verbose             Enable detailed diagnostics output.
 
@@ -87,7 +85,6 @@ APS="$DEFAULT_APS"
 SSH_USER="$DEFAULT_SSH_USER"
 SSH_KEY=""
 CRC_THRESHOLD="$DEFAULT_CRC_THRESHOLD"
-PER_THRESHOLD="$DEFAULT_PER_THRESHOLD"
 KUMA_URL="${KUMA_URL:-}"
 DRY_RUN=false
 VERBOSE=false
@@ -122,10 +119,6 @@ while [[ $# -gt 0 ]]; do
             CRC_THRESHOLD="$2"
             shift 2
             ;;
-        -p|--per-threshold)
-            PER_THRESHOLD="$2"
-            shift 2
-            ;;
         -n|--dry-run)
             DRY_RUN=true
             shift
@@ -155,8 +148,8 @@ fi
 
 # Detect SSH key if not explicitly provided
 if [[ -z "$SSH_KEY" ]]; then
-    if [[ -f "${HOME}/.ssh/id_ed25519" ]]; then
-        SSH_KEY="${HOME}/.ssh/id_ed25519"
+    if [[ -f "$DEFAULT_SSH_KEY" ]]; then
+        SSH_KEY="$DEFAULT_SSH_KEY"
     elif [[ -f "${HOME}/.ssh/id_rsa" ]]; then
         SSH_KEY="${HOME}/.ssh/id_rsa"
     fi
