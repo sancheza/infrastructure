@@ -302,7 +302,9 @@ def main() -> int:
             collector = VerizonCollector(router_ip, password=args.verizon_password)
             all_records.extend(collector.collect())
 
-    # Enrich records with inventory names (matching by MAC, then by IP)
+    # Enrich records with inventory names (matching by MAC, then IP, then reverse DNS)
+    import socket
+
     for rec in all_records:
         mac = rec.get("mac", "")
         ip = rec.get("ip", "")
@@ -313,6 +315,12 @@ def main() -> int:
                 rec["ip"] = inv_ip
         elif ip in ip_inv:
             rec["device_name"] = ip_inv[ip]
+        elif ip and ip != "Unknown":
+            try:
+                host_info = socket.gethostbyaddr(ip)[0]
+                rec["device_name"] = host_info.split(".")[0]
+            except Exception:
+                rec["device_name"] = rec.get("hostname", "Unknown")
         else:
             rec["device_name"] = rec.get("hostname", "Unknown")
 
