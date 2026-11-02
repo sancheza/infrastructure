@@ -876,11 +876,17 @@ def fingerprint_ap(ip: str) -> Optional[str]:
 
     # Check UniFi port 8443
     try:
-        req = urllib.request.Request(f"https://{ip}:8443/api/login")
+        req = urllib.request.Request(f"https://{ip}:8443/api/login", headers={"User-Agent": "Mozilla/5.0 (compatible; APProbe/2.0)"})
         with urllib.request.urlopen(req, timeout=0.8, context=ctx) as resp:
+            body = resp.read(2048).decode("utf-8", errors="ignore").lower()
+            headers = str(resp.headers).lower()
+            if any(k in body for k in ("unifi", "ubiquiti", "api.err", '"rc"')) or "unificookie" in headers or "ubnt" in headers:
+                return "unifi"
+    except urllib.error.HTTPError as e:
+        body = e.read(2048).decode("utf-8", errors="ignore").lower()
+        headers = str(e.headers).lower()
+        if any(k in body for k in ("unifi", "ubiquiti", "api.err", '"rc"')) or "unificookie" in headers or "ubnt" in headers:
             return "unifi"
-    except urllib.error.HTTPError:
-        return "unifi"
     except Exception:
         pass
 
