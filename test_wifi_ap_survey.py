@@ -367,5 +367,31 @@ def test_ip_sort_key_and_ordering():
     assert [r["ap_ip"] for r in records] == ["192.168.0.1", "192.168.0.2", "192.168.0.3", "192.168.0.11"]
 
 
+def test_color_styling_and_no_color():
+    """Verify semantic color wrappers adhere to thresholds and obey no_color flag."""
+    # When colors are disabled
+    assert was.colorize_rssi("-54 dBm", False) == "-54 dBm"
+    assert was.colorize_rate("866 Mbps", False) == "866 Mbps"
+    assert was.colorize_band("5 GHz", False) == "5 GHz"
+    assert was.style_cell("test", was.COLOR_BOLD, False) == "test"
+
+    # RSSI colors
+    assert was.COLOR_INFO in was.colorize_rssi("-50 dBm", True)    # Green (good)
+    assert was.COLOR_WARN in was.colorize_rssi("-68 dBm", True)    # Amber (fair)
+    assert was.COLOR_ERROR in was.colorize_rssi("-80 dBm", True)   # Red (weak)
+    assert was.COLOR_DIM in was.colorize_rssi("N/A", True)         # Dim
+
+    # Rate colors
+    assert was.COLOR_INFO in was.colorize_rate("1200 Mbps", True)  # Green (gigabit+)
+    assert was.COLOR_CYAN in was.colorize_rate("300 Mbps", True)   # Cyan (fast)
+    assert was.COLOR_WARN in was.colorize_rate("40 Mbps", True)    # Amber (moderate)
+    assert was.COLOR_ERROR in was.colorize_rate("1 Mbps", True)    # Red (slow)
+
+    # Band colors
+    assert was.COLOR_MAGENTA in was.colorize_band("6 GHz", True)
+    assert was.COLOR_CYAN in was.colorize_band("5 GHz", True)
+    assert was.COLOR_WARN in was.colorize_band("2.4 GHz (IoT)", True)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))

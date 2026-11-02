@@ -68,6 +68,76 @@ COLOR_INFO = "\033[32m"         # Green
 COLOR_WARN = "\033[38;5;214m"   # 256-color Amber
 COLOR_ERROR = "\033[31m"        # Red
 COLOR_BOLD = "\033[1m"
+COLOR_CYAN = "\033[36m"         # Cyan
+COLOR_MAGENTA = "\033[38;5;141m" # Violet / Magenta (Wi-Fi 6E/7)
+COLOR_DIM = "\033[90m"          # Dim Gray
+
+
+def should_use_color(args_no_color: bool = False) -> bool:
+    """Determines whether colorized ANSI output should be enabled."""
+    if args_no_color or os.getenv("NO_COLOR") or not sys.stdout.isatty():
+        return False
+    return True
+
+
+def style_cell(text: str, color_code: str, use_color: bool) -> str:
+    """Wraps text in color code if colors are enabled."""
+    if not use_color or not color_code:
+        return text
+    return f"{color_code}{text}{COLOR_RESET}"
+
+
+def colorize_rssi(padded_rssi: str, use_color: bool) -> str:
+    """Colorizes RSSI signal values (Green >= -60, Amber -61 to -74, Red <= -75)."""
+    if not use_color:
+        return padded_rssi
+    m = re.search(r"-?\d+", padded_rssi)
+    if not m or "dBm" not in padded_rssi:
+        return style_cell(padded_rssi, COLOR_DIM if any(k in padded_rssi for k in ("N/A", "--")) else "", use_color)
+    try:
+        val = int(m.group())
+        if val >= -60:
+            return style_cell(padded_rssi, COLOR_INFO, use_color)
+        elif val >= -74:
+            return style_cell(padded_rssi, COLOR_WARN, use_color)
+        else:
+            return style_cell(padded_rssi, COLOR_ERROR, use_color)
+    except Exception:
+        return padded_rssi
+
+
+def colorize_rate(padded_rate: str, use_color: bool) -> str:
+    """Colorizes link rates (Green >= 500M, Cyan >= 100M, Amber <= 50M, Red <= 10M)."""
+    if not use_color:
+        return padded_rate
+    m = re.search(r"\d+", padded_rate)
+    if not m or "Mbps" not in padded_rate:
+        return style_cell(padded_rate, COLOR_DIM if any(k in padded_rate for k in ("N/A", "--")) else "", use_color)
+    try:
+        val = float(m.group())
+        if val >= 500:
+            return style_cell(padded_rate, COLOR_INFO, use_color)
+        elif val >= 100:
+            return style_cell(padded_rate, COLOR_CYAN, use_color)
+        elif val <= 10:
+            return style_cell(padded_rate, COLOR_ERROR, use_color)
+        else:
+            return style_cell(padded_rate, COLOR_WARN, use_color)
+    except Exception:
+        return padded_rate
+
+
+def colorize_band(padded_band: str, use_color: bool) -> str:
+    """Colorizes frequency bands (Violet 6 GHz, Cyan 5 GHz, Amber IoT)."""
+    if not use_color:
+        return padded_band
+    if "6 GHz" in padded_band:
+        return style_cell(padded_band, COLOR_MAGENTA, use_color)
+    elif "5 GHz" in padded_band:
+        return style_cell(padded_band, COLOR_CYAN, use_color)
+    elif "IoT" in padded_band:
+        return style_cell(padded_band, COLOR_WARN, use_color)
+    return padded_band
 
 
 def log_info(msg: str) -> None:
@@ -1140,6 +1210,7 @@ Examples:
         help="Force automatic discovery of local APs even if configuration defaults exist."
     )
     parser.add_argument("--json", action="store_true", help="Output results in JSON format.")
+    parser.add_argument("--no-color", action="store_true", help="Disable ANSI colorized terminal output.")
     parser.add_argument(
         "--inventory", type=str,
         default=os.path.join(os.path.dirname(os.path.realpath(__file__)), "dhcp_reservations.csv"),
@@ -1274,30 +1345,49 @@ Examples:
     w_rssi = max(len("RSSI"), max((len(r["rssi"]) for r in rows), default=4))
     w_rate = max(len("LINK RATE"), max((len(r["rate"]) for r in rows if not r["is_auth_error"]), default=9))
 
+    use_color = should_use_color(args.no_color)
+
     hdr = f"{'ACCESS POINT':<{w_ap}}  {'DEVICE NAME':<{w_name}}  {'IP ADDRESS':<{w_ip}}  {'MAC ADDRESS':<{w_mac}}  {'BAND':<{w_band}}  {'RSSI':>{w_rssi}}  {'LINK RATE':>{w_rate}}"
     div = f"{'=' * w_ap}  {'=' * w_name}  {'=' * w_ip}  {'=' * w_mac}  {'=' * w_band}  {'=' * w_rssi}  {'=' * w_rate}"
     sep = f"{'-' * w_ap}  {'-' * w_name}  {'-' * w_ip}  {'-' * w_mac}  {'-' * w_band}  {'-' * w_rssi}  {'-' * w_rate}"
 
-    print(f"\n{COLOR_BOLD}{hdr}{COLOR_RESET}")
-    print(div)
+    print(f"\n{style_cell(hdr, COLOR_BOLD, use_color)}")
+    print(style_cell(div, COLOR_DIM, use_color))
 
     prev_ap_ip = None
     for r in rows:
         if prev_ap_ip is not None and r["ap_ip"] != prev_ap_ip:
-            print(sep)
+            print(style_cell(sep, COLOR_DIM, use_color))
         prev_ap_ip = r["ap_ip"]
 
-        if r["is_auth_error"]:
-            print(f"{r['ap']:<{w_ap}}  {COLOR_WARN}{r['name']:<{w_name}}{COLOR_RESET}  {r['ip']:<{w_ip}}  {r['mac']:<{w_mac}}  {r['band']:<{w_band}}  {r['rssi']:>{w_rssi}}  {r['rate']}")
-        else:
-            print(f"{r['ap']:<{w_ap}}  {r['name']:<{w_name}}  {r['ip']:<{w_ip}}  {r['mac']:<{w_mac}}  {r['band']:<{w_band}}  {r['rssi']:>{w_rssi}}  {r['rate']:>{w_rate}}")
+        ap_cell = style_cell(f"{r['ap']:<{w_ap}}", COLOR_BOLD if not r["is_auth_error"] else "", use_color)
 
-    print(div)
+        if r["is_auth_error"]:
+            name_cell = style_cell(f"{r['name']:<{w_name}}", COLOR_WARN, use_color)
+            ip_cell = f"{r['ip']:<{w_ip}}"
+            mac_cell = style_cell(f"{r['mac']:<{w_mac}}", COLOR_DIM, use_color)
+            band_cell = style_cell(f"{r['band']:<{w_band}}", COLOR_DIM, use_color)
+            rssi_cell = style_cell(f"{r['rssi']:>{w_rssi}}", COLOR_DIM, use_color)
+            rate_cell = style_cell(f"{r['rate']}", COLOR_WARN, use_color)
+            print(f"{ap_cell}  {name_cell}  {ip_cell}  {mac_cell}  {band_cell}  {rssi_cell}  {rate_cell}")
+        else:
+            name_color = COLOR_DIM if r["name"] == "Unknown" else COLOR_BOLD
+            name_cell = style_cell(f"{r['name']:<{w_name}}", name_color, use_color)
+            ip_cell = f"{r['ip']:<{w_ip}}"
+            mac_color = COLOR_DIM if r["mac"] == "Unknown" else ""
+            mac_cell = style_cell(f"{r['mac']:<{w_mac}}", mac_color, use_color)
+            band_cell = colorize_band(f"{r['band']:<{w_band}}", use_color)
+            rssi_cell = colorize_rssi(f"{r['rssi']:>{w_rssi}}", use_color)
+            rate_cell = colorize_rate(f"{r['rate']:>{w_rate}}", use_color)
+            print(f"{ap_cell}  {name_cell}  {ip_cell}  {mac_cell}  {band_cell}  {rssi_cell}  {rate_cell}")
+
+    print(style_cell(div, COLOR_DIM, use_color))
 
     valid_clients = [r for r in rows if not r["is_auth_error"]]
     unique_aps = sorted(set(r["ap_ip"] for r in rows if r["ap_ip"]), key=ip_sort_key)
     ap_counts = [f"{sum(1 for r in valid_clients if r['ap_ip'] == ap)} on {ap}" for ap in unique_aps]
-    print(f"{COLOR_BOLD}Total:{COLOR_RESET} {len(valid_clients)} active wireless client(s) across {len(unique_aps)} AP(s) ({', '.join(ap_counts)})\n")
+    total_tag = style_cell("Total:", COLOR_BOLD, use_color)
+    print(f"{total_tag} {len(valid_clients)} active wireless client(s) across {len(unique_aps)} AP(s) ({', '.join(ap_counts)})\n")
 
     return 0
 
