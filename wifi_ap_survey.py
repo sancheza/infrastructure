@@ -817,58 +817,67 @@ def fingerprint_ap(ip: str) -> Optional[str]:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
 
-    for proto in ["http", "https"]:
-        url = f"{proto}://{ip}/"
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; APProbe/2.0)"})
-            with urllib.request.urlopen(req, timeout=1.5, context=ctx) as resp:
-                headers = {k.lower(): v for k, v in resp.headers.items()}
-                body = resp.read(2048).decode("utf-8", errors="ignore")
-                auth = headers.get("www-authenticate", "").lower()
-                server = headers.get("server", "").lower()
-
-                if "netgear" in auth or "netgear" in body.lower():
-                    return "netgear"
-                if "main_login.asp" in body.lower() or "asus" in body.lower():
-                    return "asus"
-                if "fios router" in body.lower() or "verizon" in body.lower():
-                    return "verizon"
-                if "openwrt" in body.lower() or "luci" in body.lower():
-                    return "openwrt"
-                if "unifi" in body.lower() or "ubiquiti" in body.lower():
-                    return "unifi"
-                if "mikrotik" in body.lower() or "routeros" in body.lower():
-                    return "mikrotik"
-                if "tplink" in body.lower() or "omada" in body.lower():
-                    return "tplink"
-        except urllib.error.HTTPError as e:
-            auth = str(e.headers.get("WWW-Authenticate", "")).lower()
-            body = e.read(1024).decode("utf-8", errors="ignore")
+    # Fast HTTP check (ASUS, Netgear, OpenWrt, MikroTik, TP-Link)
+    try:
+        req = urllib.request.Request(f"http://{ip}/", headers={"User-Agent": "Mozilla/5.0 (compatible; APProbe/2.0)"})
+        with urllib.request.urlopen(req, timeout=0.8, context=ctx) as resp:
+            body = resp.read(2048).decode("utf-8", errors="ignore")
+            auth = resp.headers.get("www-authenticate", "").lower()
             if "netgear" in auth or "netgear" in body.lower():
                 return "netgear"
-            if "fios" in body.lower() or "verizon" in body.lower():
-                return "verizon"
+            if "main_login.asp" in body.lower() or "asus" in body.lower():
+                return "asus"
             if "openwrt" in body.lower() or "luci" in body.lower():
                 return "openwrt"
-            if "mikrotik" in auth or "mikrotik" in body.lower():
+            if "mikrotik" in body.lower() or "routeros" in body.lower():
                 return "mikrotik"
-        except Exception:
-            pass
+            if "tplink" in body.lower() or "omada" in body.lower():
+                return "tplink"
+    except urllib.error.HTTPError as e:
+        auth = str(e.headers.get("WWW-Authenticate", "")).lower()
+        body = e.read(1024).decode("utf-8", errors="ignore")
+        if "netgear" in auth or "netgear" in body.lower():
+            return "netgear"
+        if "openwrt" in body.lower() or "luci" in body.lower():
+            return "openwrt"
+        if "mikrotik" in auth or "mikrotik" in body.lower():
+            return "mikrotik"
+    except Exception:
+        pass
 
-    # Check Verizon specific endpoint (/loginStatus.cgi)
+    # Fast HTTPS check (Verizon CR1000A / G3100)
     try:
         req = urllib.request.Request(f"https://{ip}/loginStatus.cgi")
-        with urllib.request.urlopen(req, timeout=1.2, context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=0.8, context=ctx) as resp:
             data = resp.read(512).decode("utf-8", errors="ignore")
             if "loginToken" in data or "Fios" in data:
                 return "verizon"
     except Exception:
         pass
 
-    # Check UniFi ports 8443
+    # General HTTPS check (UniFi, Netgear HTTPS, Verizon web root)
+    try:
+        req = urllib.request.Request(f"https://{ip}/", headers={"User-Agent": "Mozilla/5.0 (compatible; APProbe/2.0)"})
+        with urllib.request.urlopen(req, timeout=0.8, context=ctx) as resp:
+            body = resp.read(2048).decode("utf-8", errors="ignore")
+            auth = resp.headers.get("www-authenticate", "").lower()
+            if "fios router" in body.lower() or "verizon" in body.lower():
+                return "verizon"
+            if "netgear" in auth or "netgear" in body.lower():
+                return "netgear"
+            if "unifi" in body.lower() or "ubiquiti" in body.lower():
+                return "unifi"
+    except urllib.error.HTTPError as e:
+        body = e.read(1024).decode("utf-8", errors="ignore")
+        if "fios" in body.lower() or "verizon" in body.lower():
+            return "verizon"
+    except Exception:
+        pass
+
+    # Check UniFi port 8443
     try:
         req = urllib.request.Request(f"https://{ip}:8443/api/login")
-        with urllib.request.urlopen(req, timeout=1.2, context=ctx) as resp:
+        with urllib.request.urlopen(req, timeout=0.8, context=ctx) as resp:
             return "unifi"
     except urllib.error.HTTPError:
         return "unifi"
@@ -897,13 +906,56 @@ def get_default_gateway() -> Optional[str]:
     return None
 
 
-def discover_candidate_ips() -> List[str]:
-    """Finds active neighboring IP addresses on the local network."""
+def check_mgmt_port(ip: str) -> Optional[str]:
+    """Tests if an IP has any common router/AP management ports open (80, 443, 22)."""
+    for port in (80, 443, 22):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.2)
+                if s.connect_ex((ip, port)) == 0:
+                    return ip
+        except Exception:
+            pass
+    return None
+
+
+def get_local_subnet_prefix() -> Optional[str]:
+    """Finds the local IPv4 /24 subnet prefix (e.g. '192.168.0.')."""
+    gw = get_default_gateway()
+    if gw:
+        parts = gw.split(".")
+        if len(parts) == 4:
+            return f"{parts[0]}.{parts[1]}.{parts[2]}."
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            parts = local_ip.split(".")
+            if len(parts) == 4:
+                return f"{parts[0]}.{parts[1]}.{parts[2]}."
+    except Exception:
+        pass
+    return None
+
+
+def discover_candidate_ips(inventory_file: Optional[str] = None) -> List[str]:
+    """Finds active neighboring IP addresses on the local network.
+
+    Combines:
+      1. Default gateway.
+      2. OS ARP table cache.
+      3. Inventory file entries (if present).
+      4. Fast parallel port sweep across the local /24 subnet to overcome cold ARP caches.
+
+    Returns:
+        Sorted list of candidate IP strings.
+    """
     candidates: Set[str] = set()
     gw = get_default_gateway()
     if gw:
         candidates.add(gw)
 
+    # 1. Check existing ARP cache
     system = platform.system()
     if system == "Darwin":
         try:
@@ -926,20 +978,43 @@ def discover_candidate_ips() -> List[str]:
         except Exception:
             pass
 
-    return sorted(candidates)
+    # 2. Check inventory if provided (filtering for router/AP keywords to avoid adding IoT clients)
+    if inventory_file and os.path.isfile(inventory_file):
+        try:
+            ap_keywords = ("router", "ap", "fios", "ax", "netgear", "asus", "wifi", "gateway", "access", "wrt", "unifi", "omada")
+            with open(inventory_file, mode="r", encoding="utf-8", errors="ignore") as f:
+                for row in csv.reader(f):
+                    if len(row) >= 3:
+                        ip = row[1].strip()
+                        name = row[2].strip().lower()
+                        if re.match(r"^\d+\.\d+\.\d+\.\d+$", ip) and any(k in name for k in ap_keywords):
+                            candidates.add(ip)
+        except Exception:
+            pass
+
+    # 3. Active subnet sweep across the /24 to guarantee cold ARP caches are populated
+    prefix = get_local_subnet_prefix()
+    if prefix:
+        sweep_ips = [f"{prefix}{i}" for i in range(1, 255) if f"{prefix}{i}" not in candidates]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=96) as ex:
+            for active_ip in ex.map(check_mgmt_port, sweep_ips):
+                if active_ip:
+                    candidates.add(active_ip)
+
+    return sorted(candidates, key=lambda x: [int(p) if p.isdigit() else 0 for p in x.split(".")])
 
 
-def auto_discover_aps() -> List[Tuple[str, str]]:
+def auto_discover_aps(inventory_file: Optional[str] = None) -> List[Tuple[str, str]]:
     """Scans local subnet neighbors in parallel and returns detected APs.
 
     Returns:
         List of (ip, brand) tuples.
     """
-    candidates = discover_candidate_ips()
+    candidates = discover_candidate_ips(inventory_file)
     log_info(f"Auto-probing {len(candidates)} local network candidates for AP signatures...")
 
     detected: List[Tuple[str, str]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(candidates) or 1)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, len(candidates) or 1)) as executor:
         future_to_ip = {executor.submit(fingerprint_ap, ip): ip for ip in candidates}
         for future in concurrent.futures.as_completed(future_to_ip):
             ip = future_to_ip[future]
@@ -1062,7 +1137,7 @@ Examples:
                 targets.append((item, probed))
     else:
         # Automated discovery mode
-        targets = auto_discover_aps()
+        targets = auto_discover_aps(inventory_file=args.inventory)
         if not targets:
             log_warn("No compatible AP controllers detected automatically on the local subnet.")
             log_info("Tip: specify APs explicitly using --routers [brand:]<ip> (e.g. --routers asus:192.168.1.2)")
