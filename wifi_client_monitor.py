@@ -53,6 +53,40 @@ def log_error(msg: str) -> None:
     print(f"{COLOR_ERROR}{'ERROR':<8}{COLOR_RESET} {msg}", file=sys.stderr)
 
 
+def load_dotenv_file(filepath: Optional[str] = None) -> None:
+    """Loads environment variables from a .env file into os.environ if present.
+
+    Args:
+        filepath: Optional path to .env file. Defaults to script directory .env
+                  or user home directory ~/.env.
+    """
+    candidates = []
+    if filepath:
+        candidates.append(filepath)
+    else:
+        script_dir = os.path.dirname(os.path.realpath(__file__))
+        candidates.append(os.path.join(script_dir, ".env"))
+        candidates.append(os.path.expanduser("~/.env"))
+        candidates.append("/usr/local/bin/.env")
+
+    for env_path in candidates:
+        if os.path.isfile(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        key, val = line.split("=", 1)
+                        key = key.strip().removeprefix("export ").strip()
+                        val = val.strip().strip('"').strip("'")
+                        if key and key not in os.environ:
+                            os.environ[key] = val
+                break
+            except Exception:
+                pass
+
+
 def load_network_inventory(inventory_file: str) -> Tuple[Dict[str, Tuple[str, str]], Dict[str, str]]:
     """Loads MAC-to-(IP, Hostname) and IP-to-Hostname mappings from inventory.
 
@@ -282,6 +316,8 @@ def main() -> int:
 
     args = parser.parse_args()
 
+    load_dotenv_file()
+
     mac_inv, ip_inv = load_network_inventory(args.inventory)
     router_list = [r.strip() for r in args.routers.split(",") if r.strip()]
     if args.all:
@@ -296,10 +332,10 @@ def main() -> int:
             collector = AsusCollector(router_ip)
             all_records.extend(collector.collect())
         elif router_ip == "192.168.0.11":
-            collector = NetgearCollector(router_ip, password=args.netgear_password)
+            collector = NetgearCollector(router_ip, password=args.netgear_password or os.getenv("NETGEAR_PASSWORD"))
             all_records.extend(collector.collect())
         elif router_ip == "192.168.0.1":
-            collector = VerizonCollector(router_ip, password=args.verizon_password)
+            collector = VerizonCollector(router_ip, password=args.verizon_password or os.getenv("VERIZON_PASSWORD"))
             all_records.extend(collector.collect())
 
     # Enrich records with inventory names (matching by MAC, then IP, then reverse DNS)
