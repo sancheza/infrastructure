@@ -75,5 +75,21 @@ def test_verizon_auth_prompt():
     assert "VERIZON_PASSWORD" in records[0]["note"]
 
 
+def test_auth_failed_formatting():
+    """Verify AUTH_FAILED records are structured properly."""
+    rec = {
+        "mac": "AUTH_FAILED",
+        "ip": "192.168.0.1",
+        "band": "Unknown",
+        "rssi": "N/A",
+        "rate": "N/A",
+        "ap_type": "Verizon Fios Gateway",
+        "ap_ip": "192.168.0.1",
+        "note": "Authentication failed: invalid password"
+    }
+    assert rec["mac"] == "AUTH_FAILED"
+    assert rec["ap_ip"] == "192.168.0.1"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))

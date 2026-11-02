@@ -20,11 +20,17 @@ ADR Compliance:
 
 import argparse
 import csv
+import hashlib
+import http.cookiejar
 import json
 import os
 import re
+import ssl
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 VERSION = "1.0.0"
@@ -210,7 +216,7 @@ class NetgearCollector:
         self.password = password or os.getenv("NETGEAR_PASSWORD", "")
 
     def collect(self) -> List[Dict[str, Any]]:
-        """Collects connected stations via Netgear SOAP / Web services."""
+        """Collects connected wireless stations via Netgear web services."""
         clients: List[Dict[str, Any]] = []
         if not self.password:
             # Report status with helpful prompt without breaking the full output
@@ -225,46 +231,60 @@ class NetgearCollector:
                 "note": "Set NETGEAR_PASSWORD or pass --netgear-password to authenticate"
             }]
 
-        soap_url = f"http://{self.ip}/soap/server_sa/"
-        body = (
-            '<?xml version="1.0" encoding="utf-8"?>'
-            '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
-            '<soap:Body><GetAttachDevice2 xmlns="urn:NETGEAR-ROUTER:service:DeviceInfo:1">'
-            '</GetAttachDevice2></soap:Body></soap:Envelope>'
-        )
-        curl_cmd = [
-            "curl", "-s", "-k", "-u", f"admin:{self.password}",
-            "-H", 'SOAPAction: "urn:NETGEAR-ROUTER:service:DeviceInfo:1#GetAttachDevice2"',
-            "-d", body, soap_url
-        ]
-
         try:
-            res = subprocess.run(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
-            # Parse NewAttachDevice XML or text output
-            entries = re.findall(r"@([0-9]+<[^@]+)", res.stdout)
-            for entry in entries:
-                parts = entry.split("<")
-                if len(parts) >= 6:
-                    ip, name, mac, conn_type, link_rate = parts[1], parts[2], parts[3].upper(), parts[4], parts[5]
-                    band = "5 GHz" if "5G" in conn_type.upper() else "2.4 GHz"
+            passman = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+            passman.add_password(None, f"http://{self.ip}/", "admin", self.password)
+            authhandler = urllib.request.HTTPBasicAuthHandler(passman)
+            cj = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj), authhandler)
+
+            req = urllib.request.Request(
+                f"http://{self.ip}/DEV_device.htm",
+                headers={"User-Agent": "curl/7.68.0"}
+            )
+            with opener.open(req, timeout=6) as resp:
+                html = resp.read().decode("utf-8", errors="ignore")
+
+            if "Wireless Devices" in html:
+                wireless_part = html.split("Wireless Devices", 1)[1]
+                rows = re.findall(
+                    r'<td[^>]*><span class="ttext">([0-9.]+)</span></td>\s*<td[^>]*><span class="ttext">([^<]*)</span></td>\s*<td[^>]*><span class="ttext">([0-9A-Fa-f:]{17})</span></td>',
+                    wireless_part
+                )
+                for ip, name, mac in rows:
+                    name_clean = name.strip() if name.strip() not in ("--", "") else None
                     clients.append({
-                        "mac": mac,
                         "ip": ip,
-                        "band": band,
+                        "mac": mac.upper(),
+                        "hostname": name_clean,
+                        "band": "2.4/5 GHz",
                         "rssi": "N/A",
-                        "rate": f"{link_rate} Mbps" if link_rate else "Unknown",
+                        "rate": "N/A",
                         "ap_type": "Netgear R6700v3",
-                        "ap_ip": self.ip,
-                        "hostname": name
+                        "ap_ip": self.ip
                     })
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                log_warn(f"Netgear authentication failed on {self.ip}: invalid password")
+                return [{
+                    "mac": "AUTH_FAILED",
+                    "ip": self.ip,
+                    "band": "Unknown",
+                    "rssi": "N/A",
+                    "rate": "N/A",
+                    "ap_type": "Netgear R6700v3",
+                    "ap_ip": self.ip,
+                    "note": "Authentication failed: 401 Unauthorized"
+                }]
+            log_warn(f"Netgear query failed on {self.ip}: HTTP {e.code}")
         except Exception as e:
-            log_warn(f"Netgear query failed on {self.ip}: {e}")
+            log_warn(f"Netgear query failed on {self.ip}: {type(e).__name__} ({e})")
 
         return clients
 
 
 class VerizonCollector:
-    """Queries connected clients from Verizon Fios Gateway routers."""
+    """Queries connected clients from Verizon Fios Gateway routers (e.g. CR1000A / G3100)."""
 
     def __init__(self, ip: str, password: Optional[str] = None):
         self.ip = ip
@@ -285,8 +305,115 @@ class VerizonCollector:
             }]
 
         clients: List[Dict[str, Any]] = []
-        # Verizon Fios routers use web API with session token authentication
         log_info(f"Authenticating with Verizon Gateway at {self.ip}...")
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+            cj = http.cookiejar.CookieJar()
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=ctx),
+                urllib.request.HTTPCookieProcessor(cj)
+            )
+
+            # Step 1: Obtain login token
+            req = urllib.request.Request(f"https://{self.ip}/loginStatus.cgi")
+            with opener.open(req, timeout=5) as resp:
+                status_data = json.loads(resp.read().decode())
+                login_token = status_data.get("loginToken", "")
+
+            if not login_token:
+                log_warn(f"Verizon gateway at {self.ip} did not provide a login token")
+                return []
+
+            # Step 2: Hash credentials according to Luci admin auth
+            user_md5 = hashlib.md5(b"admin").hexdigest().lower()
+            pw_md5 = hashlib.md5(self.password.encode()).hexdigest().lower()
+            combined = (login_token + pw_md5).encode("ascii")
+            pw_hash = hashlib.sha512(combined).hexdigest().lower()
+
+            form_data = urllib.parse.urlencode({
+                "luci_username": user_md5,
+                "luci_password": pw_hash,
+                "luci_view": "Desktop",
+                "luci_token": login_token,
+                "luci_keep_login": "0"
+            }).encode("utf-8")
+
+            login_req = urllib.request.Request(
+                f"https://{self.ip}/login.cgi",
+                data=form_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            )
+            try:
+                with opener.open(login_req, timeout=5) as resp:
+                    pass
+            except urllib.error.HTTPError as e:
+                if e.code == 403:
+                    try:
+                        err_data = json.loads(e.read().decode())
+                        flag = err_data.get("flag")
+                        if flag == 1:
+                            note = "Authentication failed: invalid password"
+                        elif flag == 7:
+                            note = "Authentication failed: temporarily locked (too many attempts)"
+                        else:
+                            note = f"Authentication failed: error flag {flag}"
+                    except Exception:
+                        note = "Authentication failed: HTTP 403 Forbidden"
+                    log_warn(f"Verizon authentication failed on {self.ip}: {note}")
+                    return [{
+                        "mac": "AUTH_FAILED",
+                        "ip": self.ip,
+                        "band": "Unknown",
+                        "rssi": "N/A",
+                        "rate": "N/A",
+                        "ap_type": "Verizon Fios Gateway",
+                        "ap_ip": self.ip,
+                        "note": note
+                    }]
+                raise
+
+            # Step 3: Fetch known devices
+            dev_req = urllib.request.Request(f"https://{self.ip}/cgi/cgi_known_devices.js")
+            with opener.open(dev_req, timeout=5) as resp:
+                dev_js = resp.read().decode("utf-8", errors="ignore")
+
+            match = re.search(r'addROD\s*\(\s*["\']known_device_list["\']\s*,\s*(\{.*?\})\s*\);', dev_js, re.DOTALL)
+            if match:
+                data = json.loads(match.group(1))
+                dev_list = data.get("known_devices", [])
+                for dev in dev_list:
+                    conn = dev.get("conn_type", "").lower()
+                    status = str(dev.get("status", "")).lower()
+                    if "wifi" in conn or "wireless" in conn or dev.get("is_wireless", False):
+                        if status in ("1", "true", "connected", "active"):
+                            clients.append({
+                                "mac": dev.get("mac", "").upper(),
+                                "ip": dev.get("ip", "Unknown"),
+                                "hostname": dev.get("name") or dev.get("host_name"),
+                                "band": dev.get("band", "Wi-Fi"),
+                                "rssi": f"{dev.get('rssi')} dBm" if dev.get("rssi") else "N/A",
+                                "rate": f"{dev.get('tx_rate')} Mbps" if dev.get("tx_rate") else "N/A",
+                                "ap_type": "Verizon Fios Gateway",
+                                "ap_ip": self.ip
+                            })
+
+            # Logout politely
+            try:
+                logout_req = urllib.request.Request(
+                    f"https://{self.ip}/logout.cgi",
+                    data=b"",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}
+                )
+                opener.open(logout_req, timeout=3)
+            except Exception:
+                pass
+
+        except Exception as e:
+            log_warn(f"Verizon query failed on {self.ip}: {type(e).__name__} ({e})")
+
         return clients
 
 
@@ -369,9 +496,10 @@ def main() -> int:
     print("-" * 106)
 
     for rec in all_records:
-        if rec.get("mac") == "AUTH_REQUIRED":
+        if rec.get("mac") in ("AUTH_REQUIRED", "AUTH_FAILED"):
             ap_label = f"{rec.get('ap_type')} ({rec.get('ap_ip')})"
-            print(f"{ap_label:<22} {COLOR_WARN}{'[AUTH REQUIRED]':<18}{COLOR_RESET} {rec.get('ip'):<16} {'--':<18} {'--':<8} {'--':<10} {rec.get('note', ''):<10}")
+            tag = "[AUTH FAILED]" if rec.get("mac") == "AUTH_FAILED" else "[AUTH REQUIRED]"
+            print(f"{ap_label:<22} {COLOR_WARN}{tag:<18}{COLOR_RESET} {rec.get('ip'):<16} {'--':<18} {'--':<8} {'--':<10} {rec.get('note', ''):<10}")
             continue
 
         ap_label = f"{rec.get('ap_type', '').replace('RT-AX1800S', '')} ({rec.get('ap_ip')})"
