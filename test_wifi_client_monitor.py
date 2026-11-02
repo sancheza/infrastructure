@@ -83,7 +83,7 @@ def test_auth_failed_formatting():
         "band": "Unknown",
         "rssi": "N/A",
         "rate": "N/A",
-        "ap_type": "Verizon Fios Gateway",
+        "ap_type": "Verizon Fios Router",
         "ap_ip": "192.168.0.1",
         "note": "Authentication failed: invalid password"
     }

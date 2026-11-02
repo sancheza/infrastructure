@@ -3,7 +3,7 @@
 """wifi_client_monitor.py
 
 Gathers and displays connected wireless clients across heterogeneous access points
-(ASUS RT-AX1800S, Netgear R6700v3/Genie, and Verizon Fios Gateway).
+(ASUS RT-AX1800S, Netgear R6700v3/Genie, and Verizon Fios Router).
 Correlates MAC addresses with DHCP reservations to report device names,
 IPs, frequency bands (2.4G/5G), signal strength (RSSI), and PHY link rates.
 
@@ -284,14 +284,27 @@ class NetgearCollector:
 
 
 class VerizonCollector:
-    """Queries connected clients from Verizon Fios Gateway routers (e.g. CR1000A / G3100)."""
+    """Queries connected clients from Verizon Fios Router (e.g. CR1000A / G3100)."""
 
-    def __init__(self, ip: str, password: Optional[str] = None):
+    def __init__(self, ip: str, password: Optional[str] = None, username: Optional[str] = None):
         self.ip = ip
         self.password = password or os.getenv("VERIZON_PASSWORD", "")
+        self.username = username or os.getenv("VERIZON_USERNAME", "admin")
+
+    @staticmethod
+    def _arc_md5(s: str) -> str:
+        """Verizon LuCI ArcMD5: SHA-512 of lowercase MD5 hex string."""
+        m = hashlib.md5(s.encode("utf-8")).hexdigest().lower()
+        return hashlib.sha512(m.encode("ascii")).hexdigest().lower()
+
+    @staticmethod
+    def _login_encode(password: str, token: str) -> str:
+        """Verizon LuCI login_encode: SHA-512 of token + ArcMD5(password)."""
+        arc = VerizonCollector._arc_md5(password)
+        return hashlib.sha512((token + arc).encode("ascii")).hexdigest().lower()
 
     def collect(self) -> List[Dict[str, Any]]:
-        """Collects connected wireless devices from the Verizon Fios Gateway."""
+        """Collects connected wireless devices from the Verizon Fios Router."""
         if not self.password:
             return [{
                 "mac": "AUTH_REQUIRED",
@@ -299,13 +312,13 @@ class VerizonCollector:
                 "band": "Unknown",
                 "rssi": "N/A",
                 "rate": "N/A",
-                "ap_type": "Verizon Fios Gateway",
+                "ap_type": "Verizon Fios Router",
                 "ap_ip": self.ip,
                 "note": "Set VERIZON_PASSWORD or pass --verizon-password to authenticate"
             }]
 
         clients: List[Dict[str, Any]] = []
-        log_info(f"Authenticating with Verizon Gateway at {self.ip}...")
+        log_info(f"Authenticating with Verizon Router at {self.ip}...")
         try:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -324,83 +337,113 @@ class VerizonCollector:
                 login_token = status_data.get("loginToken", "")
 
             if not login_token:
-                log_warn(f"Verizon gateway at {self.ip} did not provide a login token")
+                log_warn(f"Verizon router at {self.ip} did not provide a login token")
                 return []
 
-            # Step 2: Hash credentials according to Luci admin auth
-            user_md5 = hashlib.md5(b"admin").hexdigest().lower()
-            pw_md5 = hashlib.md5(self.password.encode()).hexdigest().lower()
-            combined = (login_token + pw_md5).encode("ascii")
-            pw_hash = hashlib.sha512(combined).hexdigest().lower()
+            # Step 2: Try login with configured username (and alternate case if needed)
+            pw_hash = self._login_encode(self.password, login_token)
+            candidates = [self.username]
+            alt = self.username.lower() if self.username != self.username.lower() else self.username.capitalize()
+            if alt not in candidates:
+                candidates.append(alt)
 
-            form_data = urllib.parse.urlencode({
-                "luci_username": user_md5,
-                "luci_password": pw_hash,
-                "luci_view": "Desktop",
-                "luci_token": login_token,
-                "luci_keep_login": "0"
-            }).encode("utf-8")
+            login_success = False
+            last_err_note = "Authentication failed"
 
-            login_req = urllib.request.Request(
-                f"https://{self.ip}/login.cgi",
-                data=form_data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
-            )
-            try:
-                with opener.open(login_req, timeout=5) as resp:
-                    pass
-            except urllib.error.HTTPError as e:
-                if e.code == 403:
-                    try:
-                        err_data = json.loads(e.read().decode())
-                        flag = err_data.get("flag")
-                        if flag == 1:
-                            note = "Authentication failed: invalid password"
-                        elif flag == 7:
-                            note = "Authentication failed: temporarily locked (too many attempts)"
-                        else:
-                            note = f"Authentication failed: error flag {flag}"
-                    except Exception:
-                        note = "Authentication failed: HTTP 403 Forbidden"
-                    log_warn(f"Verizon authentication failed on {self.ip}: {note}")
-                    return [{
-                        "mac": "AUTH_FAILED",
-                        "ip": self.ip,
-                        "band": "Unknown",
-                        "rssi": "N/A",
-                        "rate": "N/A",
-                        "ap_type": "Verizon Fios Gateway",
-                        "ap_ip": self.ip,
-                        "note": note
-                    }]
-                raise
+            for user_candidate in candidates:
+                user_hash = self._arc_md5(user_candidate)
+                form_data = urllib.parse.urlencode({
+                    "luci_username": user_hash,
+                    "luci_password": pw_hash,
+                    "luci_view": "Desktop",
+                    "luci_token": login_token,
+                    "luci_keep_login": "0"
+                }).encode("utf-8")
 
-            # Step 3: Fetch known devices
+                login_req = urllib.request.Request(
+                    f"https://{self.ip}/login.cgi",
+                    data=form_data,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}
+                )
+                try:
+                    with opener.open(login_req, timeout=5) as resp:
+                        if resp.status == 200:
+                            login_success = True
+                            break
+                except urllib.error.HTTPError as e:
+                    if e.code == 403:
+                        try:
+                            err_data = json.loads(e.read().decode())
+                            flag = err_data.get("flag")
+                            if flag == 1:
+                                last_err_note = "Authentication failed: invalid password"
+                            elif flag == 7:
+                                last_err_note = "Authentication failed: temporarily locked (too many attempts)"
+                                break
+                            else:
+                                last_err_note = f"Authentication failed: error flag {flag}"
+                        except Exception:
+                            last_err_note = "Authentication failed: HTTP 403 Forbidden"
+                        continue
+                    raise
+
+            if not login_success:
+                log_warn(f"Verizon authentication failed on {self.ip}: {last_err_note}")
+                return [{
+                    "mac": "AUTH_FAILED",
+                    "ip": self.ip,
+                    "band": "Unknown",
+                    "rssi": "N/A",
+                    "rate": "N/A",
+                    "ap_type": "Verizon Fios Router",
+                    "ap_ip": self.ip,
+                    "note": last_err_note
+                }]
+
+            # Step 3: Fetch known devices script
             dev_req = urllib.request.Request(f"https://{self.ip}/cgi/cgi_known_devices.js")
             with opener.open(dev_req, timeout=5) as resp:
                 dev_js = resp.read().decode("utf-8", errors="ignore")
 
-            match = re.search(r'addROD\s*\(\s*["\']known_device_list["\']\s*,\s*(\{.*?\})\s*\);', dev_js, re.DOTALL)
+            # Extract active station metrics from get_wlan_stat_info
+            match = re.search(r'addROD\s*\(\s*["\']get_wlan_stat_info["\']\s*,\s*(\[.*?\])\s*\);', dev_js, re.DOTALL)
             if match:
-                data = json.loads(match.group(1))
-                dev_list = data.get("known_devices", [])
-                for dev in dev_list:
-                    conn = dev.get("conn_type", "").lower()
-                    status = str(dev.get("status", "")).lower()
-                    if "wifi" in conn or "wireless" in conn or dev.get("is_wireless", False):
-                        if status in ("1", "true", "connected", "active"):
+                raw_list = match.group(1).replace("'", '"')
+                raw_list = re.sub(r',\s*\]', ']', raw_list)
+                try:
+                    stations = json.loads(raw_list)
+                    for entry in stations:
+                        if len(entry) >= 8:
+                            mac, iface, mode, mimo, rssi, snr, pkts, rate_kbps = entry[:8]
+                            mac = mac.upper()
+                            if "ath0" in iface:
+                                band = "5 GHz"
+                            elif "ath2" in iface:
+                                band = "6 GHz"
+                            elif "ath12" in iface:
+                                band = "2.4 GHz (IoT)"
+                            else:
+                                band = "2.4 GHz"
+
+                            rssi_str = f"{rssi} dBm" if rssi else "N/A"
+                            try:
+                                rate_mbps = f"{round(float(rate_kbps) / 1000)} Mbps"
+                            except Exception:
+                                rate_mbps = f"{rate_kbps} Kbps"
+
                             clients.append({
-                                "mac": dev.get("mac", "").upper(),
-                                "ip": dev.get("ip", "Unknown"),
-                                "hostname": dev.get("name") or dev.get("host_name"),
-                                "band": dev.get("band", "Wi-Fi"),
-                                "rssi": f"{dev.get('rssi')} dBm" if dev.get("rssi") else "N/A",
-                                "rate": f"{dev.get('tx_rate')} Mbps" if dev.get("tx_rate") else "N/A",
-                                "ap_type": "Verizon Fios Gateway",
+                                "mac": mac,
+                                "ip": "Unknown",
+                                "band": band,
+                                "rssi": rssi_str,
+                                "rate": rate_mbps,
+                                "ap_type": "Verizon Fios Router",
                                 "ap_ip": self.ip
                             })
+                except Exception as e:
+                    log_warn(f"Failed parsing get_wlan_stat_info: {e}")
 
-            # Logout politely
+            # Step 4: Polite logout
             try:
                 logout_req = urllib.request.Request(
                     f"https://{self.ip}/logout.cgi",
@@ -434,6 +477,7 @@ def main() -> int:
     )
     parser.add_argument("--netgear-password", type=str, default=None, help="Admin password for Netgear router")
     parser.add_argument("--verizon-password", type=str, default=None, help="Admin password for Verizon router")
+    parser.add_argument("--verizon-username", type=str, default=None, help="Admin username for Verizon router (Default: admin)")
     parser.add_argument("--json", action="store_true", help="Output results in JSON format")
     parser.add_argument(
         "--inventory", type=str,
@@ -462,7 +506,11 @@ def main() -> int:
             collector = NetgearCollector(router_ip, password=args.netgear_password or os.getenv("NETGEAR_PASSWORD"))
             all_records.extend(collector.collect())
         elif router_ip == "192.168.0.1":
-            collector = VerizonCollector(router_ip, password=args.verizon_password or os.getenv("VERIZON_PASSWORD"))
+            collector = VerizonCollector(
+                router_ip,
+                password=args.verizon_password or os.getenv("VERIZON_PASSWORD"),
+                username=args.verizon_username or os.getenv("VERIZON_USERNAME")
+            )
             all_records.extend(collector.collect())
 
     # Enrich records with inventory names (matching by MAC, then IP, then reverse DNS)
