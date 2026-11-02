@@ -914,6 +914,23 @@ def fingerprint_ap(ip: str) -> Optional[str]:
     return None
 
 
+def ip_sort_key(ip_str: Optional[str]) -> List[int]:
+    """Converts an IPv4 address string to a list of ints for proper numeric sorting.
+
+    Args:
+        ip_str: IPv4 string (e.g. '192.168.0.1').
+
+    Returns:
+        List of 4 integers, or [999, 999, 999, 999] for invalid/unknown addresses.
+    """
+    if not ip_str or not isinstance(ip_str, str):
+        return [999, 999, 999, 999]
+    parts = ip_str.strip().split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        return [int(p) for p in parts]
+    return [999, 999, 999, 999]
+
+
 def get_default_gateway() -> Optional[str]:
     """Resolves local network default gateway IP address."""
     system = platform.system()
@@ -1028,7 +1045,7 @@ def discover_candidate_ips(inventory_file: Optional[str] = None) -> List[str]:
                 if active_ip:
                     candidates.add(active_ip)
 
-    return sorted(candidates, key=lambda x: [int(p) if p.isdigit() else 0 for p in x.split(".")])
+    return sorted(candidates, key=ip_sort_key)
 
 
 def auto_discover_aps(inventory_file: Optional[str] = None) -> List[Tuple[str, str]]:
@@ -1207,6 +1224,9 @@ Examples:
                 rec["device_name"] = rec.get("hostname", "Unknown")
         else:
             rec["device_name"] = rec.get("hostname", "Unknown")
+
+    # Sort records primarily by AP IP address, then client IP, then device name
+    all_records.sort(key=lambda r: (ip_sort_key(r.get("ap_ip")), ip_sort_key(r.get("ip")), str(r.get("device_name", ""))))
 
     if args.json:
         print(json.dumps(all_records, indent=2))
