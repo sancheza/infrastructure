@@ -344,5 +344,28 @@ def test_tplink_collector_parsing():
         assert clients[0]["rate"] == "866 Mbps"
 
 
+def test_ip_sort_key_and_ordering():
+    """Verify ip_sort_key orders IPv4 addresses numerically and handles unknowns."""
+    assert was.ip_sort_key("192.168.0.1") == [192, 168, 0, 1]
+    assert was.ip_sort_key("192.168.0.11") == [192, 168, 0, 11]
+    assert was.ip_sort_key("Unknown") == [999, 999, 999, 999]
+    assert was.ip_sort_key(None) == [999, 999, 999, 999]
+
+    # Test numerical ordering (e.g. .1 < .2 < .3 < .11)
+    ips = ["192.168.0.11", "192.168.0.3", "192.168.0.1", "192.168.0.2", "Unknown"]
+    sorted_ips = sorted(ips, key=was.ip_sort_key)
+    assert sorted_ips == ["192.168.0.1", "192.168.0.2", "192.168.0.3", "192.168.0.11", "Unknown"]
+
+    # Test sorting records by AP IP address
+    records = [
+        {"ap_ip": "192.168.0.11", "ip": "192.168.0.50", "device_name": "device-netgear"},
+        {"ap_ip": "192.168.0.2", "ip": "192.168.0.15", "device_name": "device-asus2"},
+        {"ap_ip": "192.168.0.1", "ip": "192.168.0.60", "device_name": "device-verizon"},
+        {"ap_ip": "192.168.0.3", "ip": "192.168.0.96", "device_name": "device-asus3"},
+    ]
+    records.sort(key=lambda r: (was.ip_sort_key(r.get("ap_ip")), was.ip_sort_key(r.get("ip")), str(r.get("device_name", ""))))
+    assert [r["ap_ip"] for r in records] == ["192.168.0.1", "192.168.0.2", "192.168.0.3", "192.168.0.11"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-v", __file__]))
