@@ -15,13 +15,14 @@
 set -euo pipefail
 
 SCRIPT_NAME="asus_ap_kuma_monitor.sh"
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # Default Configuration
 DEFAULT_APS="192.168.1.2:2,192.168.1.3:3"
 DEFAULT_SSH_USER="admin"
 DEFAULT_SSH_KEY="${HOME}/.ssh/id_ed25519"
 DEFAULT_CRC_THRESHOLD=10
+DEFAULT_STATE_DIR="/tmp"
 
 # ADR 0020 Color Palette
 COLOR_RESET="\033[0m"
@@ -62,7 +63,8 @@ OPTIONS:
                             (Default: $DEFAULT_APS).
   -u, --user <USER>         SSH username (Default: $DEFAULT_SSH_USER).
   -i, --identity <KEY>      SSH private key path (Default: auto-detect).
-  -c, --crc-threshold <NUM> Maximum allowed cumulative CRC errors (Default: $DEFAULT_CRC_THRESHOLD).
+  -c, --crc-threshold <NUM> Maximum allowed CRC error delta between runs (Default: $DEFAULT_CRC_THRESHOLD).
+  -s, --state-dir <DIR>     Directory for state tracking files (Default: $DEFAULT_STATE_DIR).
   -n, --dry-run             Run health checks without pushing to Uptime Kuma.
   -V, --verbose             Enable detailed diagnostics output.
 
@@ -85,6 +87,7 @@ APS="$DEFAULT_APS"
 SSH_USER="$DEFAULT_SSH_USER"
 SSH_KEY=""
 CRC_THRESHOLD="$DEFAULT_CRC_THRESHOLD"
+STATE_DIR="$DEFAULT_STATE_DIR"
 KUMA_URL="${KUMA_URL:-}"
 DRY_RUN=false
 VERBOSE=false
@@ -117,6 +120,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -c|--crc-threshold)
             CRC_THRESHOLD="$2"
+            shift 2
+            ;;
+        -s|--state-dir)
+            STATE_DIR="$2"
             shift 2
             ;;
         -n|--dry-run)
@@ -203,6 +210,7 @@ for ap_entry in "${AP_ARRAY[@]}"; do
 
     REMOTE_SCRIPT="swconfig dev switch0 show; echo '===WIFI==='; iwconfig ra0 2>/dev/null; iwconfig rai0 2>/dev/null; iwconfig ra1 2>/dev/null; iwconfig rai1 2>/dev/null; echo '===STATS==='; iwpriv rai0 stat 2>/dev/null; iwpriv rai1 stat 2>/dev/null"
     
+    # shellcheck disable=SC2029  # REMOTE_SCRIPT is intended to expand on the client side
     if ! raw_output=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${ap_ip}" "$REMOTE_SCRIPT" 2>&1); then
         log_error "AP ${ap_ip} is unreachable via SSH."
         TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
@@ -232,18 +240,51 @@ for ap_entry in "${AP_ARRAY[@]}"; do
         fi
     fi
 
-    # 3. Check Hardware MIB CRC Counters
+    # 3. Check Hardware MIB CRC Counters (Delta Tracking)
     rx_crc=$(echo "$raw_output" | awk "/Port ${backhaul_port} MIB counters/,/Port $((backhaul_port + 1)) MIB counters/" | grep -E '^RxCRC' | awk '{print $3}' | head -n 1 || echo 0)
     tx_crc=$(echo "$raw_output" | awk "/Port ${backhaul_port} MIB counters/,/Port $((backhaul_port + 1)) MIB counters/" | grep -E '^TxCRC' | awk '{print $3}' | head -n 1 || echo 0)
     rx_crc=${rx_crc:-0}
     tx_crc=${tx_crc:-0}
 
-    if [[ "$rx_crc" -gt "$CRC_THRESHOLD" || "$tx_crc" -gt "$CRC_THRESHOLD" ]]; then
-        log_warn "AP ${ap_ip}: Elevated switch CRC errors on port ${backhaul_port} (RxCRC: ${rx_crc}, TxCRC: ${tx_crc})."
+    state_file="${STATE_DIR}/asus_ap_crc_${ap_ip//./_}_port${backhaul_port}.state"
+    prev_rx_crc=0
+    prev_tx_crc=0
+
+    if [[ -f "$state_file" ]]; then
+        read -r prev_rx_crc prev_tx_crc < "$state_file" 2>/dev/null || { prev_rx_crc=0; prev_tx_crc=0; }
+        [[ "$prev_rx_crc" =~ ^[0-9]+$ ]] || prev_rx_crc=0
+        [[ "$prev_tx_crc" =~ ^[0-9]+$ ]] || prev_tx_crc=0
+    else
+        # Initialize baseline on first observation
+        prev_rx_crc="$rx_crc"
+        prev_tx_crc="$tx_crc"
+    fi
+
+    # Detect counter resets (e.g. AP reboot)
+    if [[ "$rx_crc" -lt "$prev_rx_crc" ]]; then
+        delta_rx="$rx_crc"
+    else
+        delta_rx=$((rx_crc - prev_rx_crc))
+    fi
+
+    if [[ "$tx_crc" -lt "$prev_tx_crc" ]]; then
+        delta_tx="$tx_crc"
+    else
+        delta_tx=$((tx_crc - prev_tx_crc))
+    fi
+
+    # Update state file when not in dry-run mode
+    if [[ "$DRY_RUN" = false ]]; then
+        mkdir -p "$STATE_DIR"
+        printf "%s %s\n" "$rx_crc" "$tx_crc" > "$state_file"
+    fi
+
+    if [[ "$delta_rx" -gt "$CRC_THRESHOLD" || "$delta_tx" -gt "$CRC_THRESHOLD" ]]; then
+        log_warn "AP ${ap_ip}: Elevated switch CRC errors on port ${backhaul_port} (Delta RxCRC: ${delta_rx}, Delta TxCRC: ${delta_tx}, Cumulative Rx: ${rx_crc}, Cumulative Tx: ${tx_crc})."
         TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
-        [[ -z "$FIRST_ERROR_MSG" ]] && FIRST_ERROR_MSG="AP_${ap_ip}_Port${backhaul_port}_CRC_Rx${rx_crc}_Tx${tx_crc}"
+        [[ -z "$FIRST_ERROR_MSG" ]] && FIRST_ERROR_MSG="AP_${ap_ip}_Port${backhaul_port}_CRC_Delta_Rx${delta_rx}_Tx${delta_tx}"
     elif [[ "$VERBOSE" = true ]]; then
-        log_info "AP ${ap_ip}: Port ${backhaul_port} CRC errors within limits (RxCRC: ${rx_crc}, TxCRC: ${tx_crc})."
+        log_info "AP ${ap_ip}: Port ${backhaul_port} CRC errors within limits (Delta Rx: ${delta_rx}, Delta Tx: ${delta_tx}, Cumulative Rx: ${rx_crc}, Cumulative Tx: ${tx_crc})."
     fi
 
     # 4. Check Wi-Fi SSID Presence
