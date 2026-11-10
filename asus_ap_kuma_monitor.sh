@@ -6,6 +6,16 @@
 #   hardware switch CRC cable errors, and wireless radio status.
 #   Reports status to an Uptime Kuma Push monitor URL.
 #
+# Usage:
+#   asus_ap_kuma_monitor.sh [-h|--help] [-v|--version] [-n|--dry-run] [OPTIONS]
+#
+# Configuration:
+#   Site-specific values come from a .env file (see .env.example) or from the
+#   matching environment variables. Precedence: command-line option, then
+#   environment variable, then .env file.
+#
+# Requirements: bash 3.2 or later, ssh, curl.
+#
 # ADR Compliance:
 #   - ADR 0005: Command-line standards (argparse, help, version, dry-run).
 #   - ADR 0006: Bash shell standards.
@@ -15,10 +25,9 @@
 set -euo pipefail
 
 SCRIPT_NAME="asus_ap_kuma_monitor.sh"
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 # Default Configuration
-DEFAULT_APS="192.168.1.2:2,192.168.1.3:3"
 DEFAULT_SSH_USER="admin"
 DEFAULT_SSH_KEY="${HOME}/.ssh/id_ed25519"
 DEFAULT_CRC_THRESHOLD=10
@@ -57,11 +66,17 @@ USAGE:
 OPTIONS:
   -h, --help                Show this help message and exit.
   -v, --version             Show script version and exit.
-  -k, --kuma-url <URL>      Uptime Kuma Push Monitor URL.
-                            (Defaults to KUMA_URL environment variable).
-  -a, --aps <IP:PORT,...>   Comma-separated list of AP_IP:BACKHAUL_PORT.
-                            (Default: $DEFAULT_APS).
-  -u, --user <USER>         SSH username (Default: $DEFAULT_SSH_USER).
+  -e, --env-file <FILE>     Read settings from FILE.
+                            (Default: first existing of <script dir>/.env,
+                            /usr/local/bin/.env, ~/.env).
+  -k, --kuma-url <URL>      Uptime Kuma Push Monitor URL (.env: KUMA_URL).
+  -a, --aps <IP:PORT,...>   Comma-separated list of AP_IP:BACKHAUL_PORT
+                            (.env: ASUS_AP_LIST). Required.
+      --ssid-24 <NAME>      2.4 GHz SSID expected on every AP
+                            (.env: ASUS_AP_SSID_24). Required.
+      --ssid-5 <NAME>       5 GHz SSID expected on every AP
+                            (.env: ASUS_AP_SSID_5). Required.
+  -u, --user <USER>         SSH username (.env: ASUS_AP_SSH_USER; Default: $DEFAULT_SSH_USER).
   -i, --identity <KEY>      SSH private key path (Default: auto-detect).
   -c, --crc-threshold <NUM> Maximum allowed CRC error delta between runs (Default: $DEFAULT_CRC_THRESHOLD).
   -s, --state-dir <DIR>     Directory for state tracking files (Default: $DEFAULT_STATE_DIR).
@@ -69,10 +84,10 @@ OPTIONS:
   -V, --verbose             Enable detailed diagnostics output.
 
 EXAMPLES:
-  # Dry-run health check from terminal
+  # Dry-run health check using the settings in .env
   $SCRIPT_NAME --dry-run --verbose
 
-  # Push to Uptime Kuma
+  # Push to Uptime Kuma, overriding the URL from .env
   $SCRIPT_NAME --kuma-url "http://kuma.lan:3001/api/push/TOKEN"
 
 EOF
@@ -83,12 +98,17 @@ show_version() {
 }
 
 # --- Argument Parsing ---
-APS="$DEFAULT_APS"
-SSH_USER="$DEFAULT_SSH_USER"
+# Site-specific settings start from the environment; a command-line option
+# overrides them and the .env file only fills settings that are still empty.
+KUMA_URL="${KUMA_URL:-}"
+ASUS_AP_LIST="${ASUS_AP_LIST:-}"
+ASUS_AP_SSID_24="${ASUS_AP_SSID_24:-}"
+ASUS_AP_SSID_5="${ASUS_AP_SSID_5:-}"
+ASUS_AP_SSH_USER="${ASUS_AP_SSH_USER:-}"
+ENV_FILE=""
 SSH_KEY=""
 CRC_THRESHOLD="$DEFAULT_CRC_THRESHOLD"
 STATE_DIR="$DEFAULT_STATE_DIR"
-KUMA_URL="${KUMA_URL:-}"
 DRY_RUN=false
 VERBOSE=false
 
@@ -102,16 +122,28 @@ while [[ $# -gt 0 ]]; do
             show_version
             exit 0
             ;;
+        -e|--env-file)
+            ENV_FILE="$2"
+            shift 2
+            ;;
         -k|--kuma-url)
             KUMA_URL="$2"
             shift 2
             ;;
         -a|--aps)
-            APS="$2"
+            ASUS_AP_LIST="$2"
+            shift 2
+            ;;
+        --ssid-24)
+            ASUS_AP_SSID_24="$2"
+            shift 2
+            ;;
+        --ssid-5)
+            ASUS_AP_SSID_5="$2"
             shift 2
             ;;
         -u|--user)
-            SSH_USER="$2"
+            ASUS_AP_SSH_USER="$2"
             shift 2
             ;;
         -i|--identity)
@@ -142,15 +174,73 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Try loading KUMA_URL from .env if still empty
-if [[ -z "$KUMA_URL" && "$DRY_RUN" = false ]]; then
-    if [[ -f "/usr/local/bin/.env" ]]; then
-        # shellcheck disable=SC1091
-        source /usr/local/bin/.env
-    elif [[ -f "${HOME}/.env" ]]; then
-        # shellcheck disable=SC1091
-        source "${HOME}/.env"
+# Directory holding the real script file, following symlinks (the script is
+# normally run through a symlink in ~/.local/bin).
+script_dir() {
+    local src="${BASH_SOURCE[0]}" dir
+    while [[ -L "$src" ]]; do
+        dir="$(cd -P "$(dirname "$src")" && pwd)"
+        src="$(readlink "$src")"
+        [[ "$src" != /* ]] && src="${dir}/${src}"
+    done
+    cd -P "$(dirname "$src")" && pwd
+}
+
+# Fill each setting that is still empty from FILE. Only the settings below are
+# read, and the file is parsed as KEY=VALUE lines rather than executed.
+load_env_file() {
+    local file="$1" line key value
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+        line="${line#export }"
+        key="${line%%=*}"
+        value="${line#*=}"
+        key="${key//[[:space:]]/}"
+        # Strip one pair of surrounding quotes.
+        if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then
+            value="${BASH_REMATCH[1]}"
+        fi
+        case "$key" in
+            KUMA_URL|ASUS_AP_LIST|ASUS_AP_SSID_24|ASUS_AP_SSID_5|ASUS_AP_SSH_USER)
+                if [[ -z "${!key}" ]]; then
+                    printf -v "$key" '%s' "$value"
+                fi
+                ;;
+        esac
+    done < "$file"
+}
+
+if [[ -n "$ENV_FILE" ]]; then
+    if [[ ! -f "$ENV_FILE" ]]; then
+        log_error "Env file not found: $ENV_FILE"
+        exit 1
     fi
+    load_env_file "$ENV_FILE"
+else
+    for candidate in "$(script_dir)/.env" "/usr/local/bin/.env" "${HOME}/.env"; do
+        if [[ -f "$candidate" ]]; then
+            load_env_file "$candidate"
+            break
+        fi
+    done
+fi
+
+APS="$ASUS_AP_LIST"
+SSID_24="$ASUS_AP_SSID_24"
+SSID_5="$ASUS_AP_SSID_5"
+SSH_USER="${ASUS_AP_SSH_USER:-$DEFAULT_SSH_USER}"
+
+missing=()
+[[ -z "$APS" ]] && missing+=("access points (ASUS_AP_LIST or --aps)")
+[[ -z "$SSID_24" ]] && missing+=("2.4 GHz SSID (ASUS_AP_SSID_24 or --ssid-24)")
+[[ -z "$SSID_5" ]] && missing+=("5 GHz SSID (ASUS_AP_SSID_5 or --ssid-5)")
+if [[ ${#missing[@]} -gt 0 ]]; then
+    for item in "${missing[@]}"; do
+        log_error "Missing setting: ${item}"
+    done
+    echo "Set them in a .env file (see .env.example) or pass the options. Try '$SCRIPT_NAME --help'." >&2
+    exit 1
 fi
 
 # Detect SSH key if not explicitly provided
@@ -288,20 +378,20 @@ for ap_entry in "${AP_ARRAY[@]}"; do
     fi
 
     # 4. Check Wi-Fi SSID Presence
-    if ! echo "$raw_output" | grep -q 'ESSID:"ExampleNet"'; then
-        log_error "AP ${ap_ip}: 2.4 GHz SSID 'ExampleNet' not broadcasting."
+    if ! echo "$raw_output" | grep -qF "ESSID:\"${SSID_24}\""; then
+        log_error "AP ${ap_ip}: 2.4 GHz SSID '${SSID_24}' not broadcasting."
         TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
-        [[ -z "$FIRST_ERROR_MSG" ]] && FIRST_ERROR_MSG="AP_${ap_ip}_SSID_ExampleNet_Down"
+        [[ -z "$FIRST_ERROR_MSG" ]] && FIRST_ERROR_MSG="AP_${ap_ip}_SSID_2.4GHz_Down"
     elif [[ "$VERBOSE" = true ]]; then
-        log_info "AP ${ap_ip}: 2.4 GHz SSID 'ExampleNet' broadcasting."
+        log_info "AP ${ap_ip}: 2.4 GHz SSID '${SSID_24}' broadcasting."
     fi
 
-    if ! echo "$raw_output" | grep -q 'ESSID:"ExampleNet5"'; then
-        log_error "AP ${ap_ip}: 5 GHz SSID 'ExampleNet5' not broadcasting."
+    if ! echo "$raw_output" | grep -qF "ESSID:\"${SSID_5}\""; then
+        log_error "AP ${ap_ip}: 5 GHz SSID '${SSID_5}' not broadcasting."
         TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
-        [[ -z "$FIRST_ERROR_MSG" ]] && FIRST_ERROR_MSG="AP_${ap_ip}_SSID_ExampleNet5_Down"
+        [[ -z "$FIRST_ERROR_MSG" ]] && FIRST_ERROR_MSG="AP_${ap_ip}_SSID_5GHz_Down"
     elif [[ "$VERBOSE" = true ]]; then
-        log_info "AP ${ap_ip}: 5 GHz SSID 'ExampleNet5' broadcasting."
+        log_info "AP ${ap_ip}: 5 GHz SSID '${SSID_5}' broadcasting."
     fi
 done
 

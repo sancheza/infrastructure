@@ -173,6 +173,9 @@ def _config(tmp_path, monkeypatch, importer_result=None):
     if importer_result is None:
         importer_result = {"returncode": 0, "stdout": "ok", "stderr": ""}
     monkeypatch.setattr(svc, "run_importer", lambda config: importer_result)
+    # Reservations probe the machine's ARP cache; keep tests independent of the
+    # network they run on.
+    monkeypatch.setattr(svc, "check_arp_neighbor", lambda ip: None)
 
     return svc.ServiceConfig(
         reservations_file=reservations_file,
